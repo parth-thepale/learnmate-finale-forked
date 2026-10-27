@@ -37,6 +37,11 @@ import {
   buildAnimatedExplanationScenes,
   type AnimatedExplanationScene,
 } from './src/utils/educationalSpecsEngine.ts';
+import {
+  callAnthropicMessagesApi,
+  generateProcedural3DScene,
+} from './src/utils/ai3dModelEngine.ts';
+import type { Custom3DSceneSpec } from './src/types/study.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -3173,6 +3178,112 @@ Evaluate:
     } catch (err) {
       res.status(500).json({
         error: err instanceof Error ? err.message : 'Failed to evaluate explanation.',
+      });
+    }
+  });
+
+  // 10b. Creative Studio — AI 3D Model Creator (Anthropic Claude + Gemini Flash + Procedural Engine)
+  app.post('/api/create/3d-model', async (req, res) => {
+    try {
+      const {
+        concept = 'DNA Double Helix',
+        contextText = '',
+        style = 'academic',
+      } = req.body as {
+        concept?: string;
+        contextText?: string;
+        style?: string;
+      };
+
+      const systemPrompt = `You are a 3D scientific visualization architect. Convert the user's educational topic into a structured Three.js 3D scene specification.
+Return ONLY a valid JSON object with:
+- "title": concise title of the 3D model
+- "summary": 1-2 sentence academic explanation of what this 3D model represents
+- "category": topic category (physics, chemistry, biology, mathematics, engineering, astronomy)
+- "camera": { "position": [0, 3, 8] }
+- "meshes": array of 8 to 35 3D geometric primitives that form the recognizable scientific structure.
+Each mesh object MUST have:
+  - "id": string unique id
+  - "shape": one of "sphere", "box", "cylinder", "torus", "cone", "capsule", "ring"
+  - "args": array of numbers for geometry dimensions (e.g. for sphere [radius, 16, 16], for box [w, h, d], for cylinder [topR, botR, height, 16], for torus [radius, tube, 12, 24])
+  - "position": [x, y, z] coordinates centered around [0, 0, 0] within -4 to +4
+  - "rotation": optional [rx, ry, rz] radians
+  - "color": hex color string like "#10B981", "#3B82F6", "#EF4444", "#F59E0B", "#8B5CF6", "#06B6D4"
+  - "roughness": optional number (0..1)
+  - "metalness": optional number (0..1)
+  - "label": short student-facing component name
+- "annotations": 2 to 3 educational callouts with "title", "description", and "position": [x, y, z].
+Never output markdown fences or commentary outside the JSON.`;
+
+      let sceneSpec: Custom3DSceneSpec | null = null;
+      let provider: 'anthropic_claude' | 'gemini' | 'procedural_engine' = 'procedural_engine';
+      let modelUsed = 'procedural_engine';
+
+      // 1. Attempt Anthropic Claude if key is available
+      if (process.env.ANTHROPIC_API_KEY && process.env.ANTHROPIC_API_KEY.trim()) {
+        try {
+          const claudeText = await callAnthropicMessagesApi({
+            model: 'claude-haiku-4-5-20251001',
+            system: systemPrompt,
+            prompt: `Concept to visualize in 3D: "${concept}". Academic context: ${contextText.slice(0, 400)}. Style: ${style}. Generate structured 3D scene JSON.`,
+            maxTokens: 2500,
+          });
+          if (claudeText) {
+            const cleaned = claudeText.replace(/```json\s*/i, '').replace(/```\s*$/, '').trim();
+            sceneSpec = JSON.parse(cleaned);
+            provider = 'anthropic_claude';
+            modelUsed = 'claude-haiku-4-5';
+          }
+        } catch (err) {
+          console.warn('Claude 3D generation failed, falling back to Gemini:', err);
+        }
+      }
+
+      // 2. Attempt Gemini if Claude was skipped or failed
+      if (!sceneSpec) {
+        const ai = getGenAIClient();
+        if (ai) {
+          try {
+            const resp = await ai.models.generateContent({
+              model: 'gemini-3.8-flash',
+              contents: `${systemPrompt}\n\nConcept to visualize in 3D: "${concept}". Academic context: ${contextText.slice(0, 400)}. Style: ${style}. Return JSON.`,
+              config: {
+                responseMimeType: 'application/json',
+              },
+            });
+            if (resp.text) {
+              sceneSpec = JSON.parse(resp.text);
+              provider = 'gemini';
+              modelUsed = 'gemini-3.8-flash';
+            }
+          } catch (err) {
+            console.warn('Gemini 3D generation failed, falling back to procedural:', err);
+          }
+        }
+      }
+
+      // 3. Fallback to procedural scientific scene engine
+      if (!sceneSpec || !Array.isArray(sceneSpec.meshes) || sceneSpec.meshes.length === 0) {
+        sceneSpec = generateProcedural3DScene(concept, contextText);
+        provider = 'procedural_engine';
+        modelUsed = 'procedural-scientific-engine';
+      }
+
+      res.json({
+        sceneSpec,
+        isAiGenerated: provider !== 'procedural_engine',
+        provider,
+        modelUsed,
+        userFacingNotice:
+          provider === 'anthropic_claude'
+            ? '3D Model synthesized via Anthropic Claude.'
+            : provider === 'gemini'
+            ? '3D Model synthesized via Gemini 3.8 Flash.'
+            : '3D Model synthesized via LearnMate Procedural Scientific Engine.',
+      });
+    } catch (err) {
+      res.status(500).json({
+        error: err instanceof Error ? err.message : 'Failed to generate 3D model specification.',
       });
     }
   });

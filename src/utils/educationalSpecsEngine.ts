@@ -61,7 +61,8 @@ export type SceneCategory =
   | 'math_surface_3d'
   | 'physics_projectile_3d'
   | 'chemistry_vsepr_3d'
-  | 'biology_cell_3d';
+  | 'biology_cell_3d'
+  | 'custom_ai_3d';
 
 export interface SceneParameterControl {
   id: string;
@@ -1070,6 +1071,30 @@ export function buildEducationalSceneSpec(params: {
       learningNotes: [
         'Compartmentalization allows incompatible biochemical processes (e.g., lysosomal hydrolysis vs. DNA replication) to occur simultaneously.',
         'Mitochondria possess their own circular DNA and 70S ribosomes, supporting the endosymbiotic theory.',
+      ],
+    };
+  }
+
+  if (category === 'custom_ai_3d') {
+    return {
+      id: 'scene-custom-ai-3d',
+      title: `AI 3D Model Creator (${topic})`,
+      subject: inferredSubject,
+      topic,
+      category: 'custom_ai_3d',
+      supports3D: true,
+      supports2DPlot: false,
+      summary:
+        'Interactive AI-synthesized 3D spatial model powered by Claude 3.5 & Three.js with full orbit, pan, zoom, and wireframe controls.',
+      governingEquations: [
+        'Mesh vertices (x, y, z) generated from educational spatial graphs',
+        'Shader: ACESFilmicToneMapping + PMREM Environment Illumination',
+      ],
+      parameterControls: [],
+      labels: [],
+      learningNotes: [
+        'Interact with the 3D model using mouse/touch: Left-drag to orbit, right-drag to pan, scroll/pinch to zoom.',
+        'Toggle wireframe mode to inspect the geometric polygon mesh and underlying spatial primitives.',
       ],
     };
   }

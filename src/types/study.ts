@@ -562,3 +562,43 @@ export interface StudentAcademicProfile {
 
 
 
+
+export interface Custom3DMeshSpec {
+  id: string;
+  shape: 'sphere' | 'box' | 'cylinder' | 'torus' | 'cone' | 'capsule' | 'tube' | 'ring';
+  args?: number[];
+  position: [number, number, number];
+  rotation?: [number, number, number];
+  scale?: [number, number, number];
+  color: string;
+  wireframe?: boolean;
+  transparent?: boolean;
+  opacity?: number;
+  roughness?: number;
+  metalness?: number;
+  label?: string;
+}
+
+export interface Custom3DSceneSpec {
+  title: string;
+  summary: string;
+  category?: string;
+  camera?: {
+    position: [number, number, number];
+    target?: [number, number, number];
+  };
+  meshes: Custom3DMeshSpec[];
+  annotations?: Array<{
+    title: string;
+    description: string;
+    position: [number, number, number];
+  }>;
+}
+
+export interface Generate3DModelResponse {
+  sceneSpec: Custom3DSceneSpec;
+  isAiGenerated: boolean;
+  provider: 'anthropic_claude' | 'gemini' | 'procedural_engine';
+  modelUsed?: string;
+  userFacingNotice?: string;
+}

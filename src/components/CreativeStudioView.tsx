@@ -25,7 +25,7 @@ import {
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
-import type { StudyDocument, CreativeAsset } from '../types/study';
+import type { StudyDocument, CreativeAsset, Custom3DSceneSpec } from '../types/study';
 import { studyStorage } from '../services/storageService';
 import {
   aiStudyClient,
@@ -280,6 +280,40 @@ export const CreativeStudioView: React.FC<CreativeStudioViewProps> = ({
   const [show3DLabels, setShow3DLabels] = useState(true);
   const [autoRotate3D, setAutoRotate3D] = useState(true);
   const [selectedOrganelleIdx, setSelectedOrganelleIdx] = useState(0);
+  const [custom3dPrompt, setCustom3dPrompt] = useState('DNA Double Helix');
+  const [customSceneSpec, setCustomSceneSpec] = useState<Custom3DSceneSpec | null>(null);
+  const [isGenerating3d, setIsGenerating3d] = useState(false);
+  const [wireframe3D, setWireframe3D] = useState(false);
+  const [generationNotice, setGenerationNotice] = useState<string | null>(null);
+  const [active3DProvider, setActive3DProvider] = useState<string>('Claude & Three.js');
+
+  const handleGenerate3DModel = async (overridePrompt?: string) => {
+    const targetPrompt = (overridePrompt || custom3dPrompt).trim();
+    if (!targetPrompt) return;
+    setIsGenerating3d(true);
+    setGenerationNotice(null);
+    try {
+      const resp = await aiStudyClient.generate3DModel({
+        concept: targetPrompt,
+        contextText: activeDocument.overview || activeDocument.title,
+      });
+      if (resp?.sceneSpec) {
+        setCustomSceneSpec(resp.sceneSpec);
+        setGenerationNotice(resp.userFacingNotice || '3D Model synthesized successfully.');
+        setActive3DProvider(
+          resp.provider === 'anthropic_claude'
+            ? 'Claude 3.5 Sonnet'
+            : resp.provider === 'gemini'
+            ? 'Gemini 3.8 Flash'
+            : 'Procedural 3D Engine'
+        );
+      }
+    } catch (err: any) {
+      setGenerationNotice(err?.message || 'Failed to generate 3D model.');
+    } finally {
+      setIsGenerating3d(false);
+    }
+  };
 
   const sceneSpec = useMemo(
     () =>
@@ -617,6 +651,56 @@ export const CreativeStudioView: React.FC<CreativeStudioViewProps> = ({
       rootGroup.add(erMesh);
     }
 
+    if (sceneCategory === 'custom_ai_3d' && customSceneSpec?.meshes) {
+      customSceneSpec.meshes.forEach((mesh) => {
+        let geo: THREE.BufferGeometry;
+        const a = mesh.args || [];
+        switch (mesh.shape) {
+          case 'box':
+            geo = new THREE.BoxGeometry(a[0] || 0.6, a[1] || 0.6, a[2] || 0.6);
+            break;
+          case 'cylinder':
+            geo = new THREE.CylinderGeometry(a[0] || 0.08, a[1] || 0.08, a[2] || 1, a[3] || 14);
+            break;
+          case 'torus':
+            geo = new THREE.TorusGeometry(a[0] || 1.5, a[1] || 0.04, a[2] || 12, a[3] || 36);
+            break;
+          case 'cone':
+            geo = new THREE.ConeGeometry(a[0] || 0.35, a[1] || 0.7, a[2] || 16);
+            break;
+          case 'capsule':
+            geo = new THREE.CapsuleGeometry(a[0] || 0.2, a[1] || 0.4, 8, 16);
+            break;
+          case 'sphere':
+          default:
+            geo = new THREE.SphereGeometry(a[0] || 0.3, a[1] || 18, a[2] || 18);
+            break;
+        }
+
+        const colorNum = parseInt((mesh.color || '#3b82f6').replace('#', '0x'), 16) || 0x3b82f6;
+        const mat = new THREE.MeshStandardMaterial({
+          color: colorNum,
+          wireframe: wireframe3D || Boolean(mesh.wireframe),
+          roughness: mesh.roughness ?? 0.35,
+          metalness: mesh.metalness ?? 0.15,
+          transparent: Boolean(mesh.transparent || (mesh.opacity !== undefined && mesh.opacity < 1)),
+          opacity: mesh.opacity ?? 1.0,
+        });
+
+        const meshObj = new THREE.Mesh(geo, mat);
+        if (Array.isArray(mesh.position)) {
+          meshObj.position.set(mesh.position[0], mesh.position[1], mesh.position[2]);
+        }
+        if (Array.isArray(mesh.rotation)) {
+          meshObj.rotation.set(mesh.rotation[0], mesh.rotation[1], mesh.rotation[2]);
+        }
+        if (Array.isArray(mesh.scale)) {
+          meshObj.scale.set(mesh.scale[0], mesh.scale[1], mesh.scale[2]);
+        }
+        rootGroup.add(meshObj);
+      });
+    }
+
     let animFrame = 0;
     const clock = new THREE.Clock();
 
@@ -663,6 +747,8 @@ export const CreativeStudioView: React.FC<CreativeStudioViewProps> = ({
     autoRotate3D,
     sceneParams,
     liveProjectile,
+    customSceneSpec,
+    wireframe3D,
   ]);
 
   /* =====================================================================
@@ -1472,12 +1558,18 @@ export const CreativeStudioView: React.FC<CreativeStudioViewProps> = ({
                   { id: 'math_surface_3d', label: 'Math: 3D Surface & 2D Parabola' },
                   { id: 'chemistry_vsepr_3d', label: 'Chemistry: VSEPR Molecules' },
                   { id: 'biology_cell_3d', label: 'Biology: 3D Eukaryotic Cell' },
+                  { id: 'custom_ai_3d', label: '✨ AI 3D Model Creator' },
                 ] as const
               ).map((preset) => (
                 <button
                   key={preset.id}
                   type="button"
-                  onClick={() => setSceneCategory(preset.id)}
+                  onClick={() => {
+                    setSceneCategory(preset.id);
+                    if (preset.id === 'custom_ai_3d' && !customSceneSpec) {
+                      handleGenerate3DModel('DNA Double Helix');
+                    }
+                  }}
                   className={`px-3 py-1.5 rounded-xl text-xs font-semibold cursor-pointer ${
                     sceneCategory === preset.id
                       ? 'bg-[#1A73E8] text-white'
@@ -1489,6 +1581,71 @@ export const CreativeStudioView: React.FC<CreativeStudioViewProps> = ({
               ))}
             </div>
           </div>
+
+          {sceneCategory === 'custom_ai_3d' && (
+            <div className="p-4 rounded-2xl bg-gradient-to-r from-indigo-50/80 via-purple-50/50 to-amber-50/60 border border-indigo-100/90 space-y-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <span className="px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-indigo-600 text-white shadow-2xs">
+                    AI 3D Model Creator
+                  </span>
+                  <span className="text-xs text-indigo-950 font-medium">
+                    Powered by {active3DProvider}
+                  </span>
+                </div>
+                {generationNotice && (
+                  <span className="text-xs font-medium text-emerald-800 bg-emerald-50 px-2.5 py-0.5 rounded-full border border-emerald-200">
+                    {generationNotice}
+                  </span>
+                )}
+              </div>
+
+              <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
+                <input
+                  type="text"
+                  value={custom3dPrompt}
+                  onChange={(e) => setCustom3dPrompt(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') handleGenerate3DModel();
+                  }}
+                  placeholder="Describe any scientific concept or 3D structure (e.g. DNA Double Helix, Bohr Atom, Solar System, NaCl Lattice)..."
+                  className="flex-1 px-4 py-2.5 rounded-xl border border-indigo-200 bg-white text-xs font-medium text-slate-800 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500/30"
+                />
+                <button
+                  type="button"
+                  disabled={isGenerating3d || !custom3dPrompt.trim()}
+                  onClick={() => handleGenerate3DModel()}
+                  className="px-5 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-semibold flex items-center justify-center gap-2 disabled:opacity-50 cursor-pointer shadow-sm transition-all"
+                >
+                  <Sparkles className={`w-3.5 h-3.5 ${isGenerating3d ? 'animate-spin' : ''}`} />
+                  {isGenerating3d ? 'Synthesizing 3D Model...' : 'Generate 3D Model'}
+                </button>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-1.5 pt-1">
+                <span className="text-[11px] font-semibold text-slate-500 mr-1">Quick Concepts:</span>
+                {[
+                  'DNA Double Helix',
+                  'Bohr Atom Model',
+                  'Solar System Orbits',
+                  'NaCl Crystal Lattice',
+                  'Carnot Engine Core',
+                ].map((concept) => (
+                  <button
+                    key={concept}
+                    type="button"
+                    onClick={() => {
+                      setCustom3dPrompt(concept);
+                      handleGenerate3DModel(concept);
+                    }}
+                    className="px-2.5 py-1 rounded-lg text-[11px] font-medium bg-white hover:bg-indigo-50 border border-indigo-100 text-indigo-900 transition-colors cursor-pointer"
+                  >
+                    {concept}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
 
           {/* Toolbar for 3D vs 2D Plot, Molecule switcher, Reset View, Toggle Labels */}
           <div className="flex flex-wrap items-center justify-between gap-3 p-3 rounded-2xl bg-slate-50 border border-slate-200/80">
@@ -1548,6 +1705,17 @@ export const CreativeStudioView: React.FC<CreativeStudioViewProps> = ({
                   </button>
                   <button
                     type="button"
+                    onClick={() => setWireframe3D((w) => !w)}
+                    className={`px-3 py-1.5 rounded-xl border text-xs font-semibold cursor-pointer ${
+                      wireframe3D
+                        ? 'bg-indigo-600 text-white border-indigo-600'
+                        : 'bg-white border-slate-200 text-slate-700'
+                    }`}
+                  >
+                    {wireframe3D ? 'Wireframe: ON' : 'Wireframe: OFF'}
+                  </button>
+                  <button
+                    type="button"
                     onClick={() => setShow3DLabels((l) => !l)}
                     className="px-3 py-1.5 rounded-xl bg-white border border-slate-200 text-xs font-semibold text-slate-700 cursor-pointer"
                   >
@@ -1566,11 +1734,16 @@ export const CreativeStudioView: React.FC<CreativeStudioViewProps> = ({
               <button
                 type="button"
                 onClick={() =>
-                  handleSaveCreativeAsset('lab_3d', sceneSpec.title, {
-                    sceneCategory,
-                    sceneParams,
-                    selectedMoleculeId,
-                  })
+                  handleSaveCreativeAsset(
+                    'lab_3d',
+                    sceneCategory === 'custom_ai_3d' && customSceneSpec ? customSceneSpec.title : sceneSpec.title,
+                    {
+                      sceneCategory,
+                      sceneParams,
+                      selectedMoleculeId,
+                      customSceneSpec,
+                    }
+                  )
                 }
                 className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-[#E8F0FE] text-[#1A73E8] text-xs font-semibold cursor-pointer"
               >

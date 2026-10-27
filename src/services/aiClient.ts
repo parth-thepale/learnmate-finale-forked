@@ -20,6 +20,8 @@ import type {
   DailyNewsArticle,
   EducationalPlaceItem,
   AiUsageDashboardStats,
+  Generate3DModelResponse,
+  Custom3DSceneSpec,
 } from '../types/study';
 
 export interface AiStatusMetadata {
@@ -326,6 +328,14 @@ export const aiStudyClient = {
     places: EducationalPlaceItem[];
   }> {
     return postJson('/api/explore/educational-maps', params);
+  },
+
+  async generate3DModel(params: {
+    concept: string;
+    contextText?: string;
+    style?: string;
+  }): Promise<Generate3DModelResponse> {
+    return postJson<Generate3DModelResponse>('/api/create/3d-model', params);
   },
 
   async fetchAiUsageStats(): Promise<AiUsageDashboardStats> {

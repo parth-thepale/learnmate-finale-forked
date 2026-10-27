@@ -83,6 +83,8 @@ export function App() {
   const [isAuthReady, setIsAuthReady] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
 
+  const effectiveDoc = activeDoc || documents[0] || studyStorage.getDocuments()[0];
+
   const handleSelectTab = (tab: ActiveTab) => {
     setActiveTab(tab);
     if (typeof window !== 'undefined') {
@@ -382,7 +384,7 @@ export function App() {
           <div className="max-w-[1380px] mx-auto px-4 sm:px-6 lg:px-8 py-5">
             <StudyView
               documents={documents}
-              activeDocument={activeDoc}
+              activeDocument={effectiveDoc}
               onSelectDocument={(doc) => {
                 studyStorage.setActiveDocumentId(doc.id);
                 setActiveDoc(doc);
@@ -418,7 +420,7 @@ export function App() {
         {activeTab === 'revision' && activeDoc && (
           <div className="max-w-[1380px] mx-auto px-4 sm:px-6 lg:px-8 py-6">
             <QuickReviseView
-              activeDocument={activeDoc}
+              activeDocument={effectiveDoc}
               onNavigateToCitation={(pageNumber) => {
                 setStudyInitialMode('explain');
                 handleSelectTab('study');
@@ -480,11 +482,11 @@ export function App() {
           </div>
         )}
 
-        {activeTab === 'create' && activeDoc && (
+        {activeTab === 'create' && effectiveDoc && (
           <div className="max-w-[1380px] mx-auto px-4 sm:px-6 lg:px-8 py-5">
             <CreativeStudioView
               documents={documents}
-              activeDocument={activeDoc}
+              activeDocument={effectiveDoc}
               onSelectDocument={(docId) => {
                 const found = documents.find((d) => d.id === docId);
                 if (found) setActiveDoc(found);
