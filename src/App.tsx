@@ -319,7 +319,7 @@ export function App() {
   };
 
   return (
-    <div className="min-h-screen flex flex-col bg-[#FCFBF9] text-[#121827]">
+    <div className="min-h-screen flex flex-col bg-[#FCFBF9] text-[#121827] pt-16">
       <DynamicCompanion activeDoc={effectiveDoc} />
       <Navbar
         activeTab={activeTab}

@@ -155,7 +155,7 @@ export const Navbar: React.FC<NavbarProps> = ({
     'S';
 
   return (
-    <header className="sticky top-0 z-40 w-full bg-[#FCFBF9]/95 backdrop-blur-md border-b border-[#E8E6E2] lm-no-print">
+    <header className="sticky top-16 z-40 w-full bg-[#FCFBF9]/95 backdrop-blur-md border-b border-[#E8E6E2] lm-no-print">
       <div className="max-w-[1380px] mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between gap-2">
         {/* Left: Editorial Brand Logo */}
         <div className="flex items-center gap-3 min-w-0">

@@ -183,7 +183,7 @@ export const DynamicCompanion: React.FC<DynamicCompanionProps> = ({ activeDoc })
   return (
     <div
       ref={islandRef}
-      className="fixed top-2.5 left-1/2 -translate-x-1/2 z-50 pointer-events-auto select-none"
+      className="fixed top-2 left-1/2 -translate-x-1/2 z-[100] pointer-events-auto select-none"
     >
       <motion.div
         layout
