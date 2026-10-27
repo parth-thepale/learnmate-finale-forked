@@ -12,6 +12,7 @@ import { StudentProfileModal } from './components/StudentProfileModal';
 import { ProgressView } from './components/ProgressView';
 import { VoiceTutorModal } from './components/VoiceTutorModal';
 import { NotebookAndScannerModal } from './components/NotebookAndScannerModal';
+import { DynamicCompanion } from './components/DynamicCompanion';
 import {
   StudyDocument,
   LearnMateNotification,
@@ -319,6 +320,7 @@ export function App() {
 
   return (
     <div className="min-h-screen flex flex-col bg-[#FCFBF9] text-[#121827]">
+      <DynamicCompanion activeDoc={effectiveDoc} />
       <Navbar
         activeTab={activeTab}
         onSelectTab={handleSelectTab}
