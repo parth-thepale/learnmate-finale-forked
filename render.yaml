@@ -13,3 +13,7 @@ services:
         value: "false"
       - key: GEMINI_API_KEY
         sync: false
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: HIGGSFIELD_API_KEY
+        sync: false
