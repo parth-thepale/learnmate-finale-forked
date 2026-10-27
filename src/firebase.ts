@@ -67,7 +67,10 @@ function createSafeAuth(): Auth {
 }
 
 export const auth = createSafeAuth();
-export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
+export const db =
+  firebaseConfig.firestoreDatabaseId && firebaseConfig.firestoreDatabaseId !== '(default)'
+    ? getFirestore(app, firebaseConfig.firestoreDatabaseId)
+    : getFirestore(app);
 export const googleProvider = new GoogleAuthProvider();
 
 // Suppress noisy internal SDK connection retry warnings when operating in local-first mode

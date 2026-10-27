@@ -1,12 +1,12 @@
 {
-  "projectId": "substantial-griffin-001dl",
-  "appId": "1:407204246006:web:fe4c7e744966707c4697d7",
-  "apiKey": "AIzaSyDOSo738BQ8l7Hfuui7GEcJjvHU0pWK7OA",
-  "authDomain": "substantial-griffin-001dl.firebaseapp.com",
-  "firestoreDatabaseId": "ai-studio-remixremixlearnm-b0b801ac-8d76-4879-9d5f-1e9f4601abf3",
-  "storageBucket": "substantial-griffin-001dl.firebasestorage.app",
-  "messagingSenderId": "407204246006",
-  "measurementId": "",
-  "oAuthClientId": "407204246006-muovna7hu41a4tjvpdneqnha9j72as6o.apps.googleusercontent.com",
+  "projectId": "substantial-griffin-001d-609b6",
+  "appId": "1:764902566469:web:7210a9b5ece0d48be5112c",
+  "apiKey": "AIzaSyCDI3Tnc4iYq3qDuqboO87ztjP_ui-r56E",
+  "authDomain": "substantial-griffin-001d-609b6.firebaseapp.com",
+  "firestoreDatabaseId": "(default)",
+  "storageBucket": "substantial-griffin-001d-609b6.firebasestorage.app",
+  "messagingSenderId": "764902566469",
+  "measurementId": "G-PK4XN22LSW",
+  "oAuthClientId": "",
   "recaptchaSiteKey": ""
 }
