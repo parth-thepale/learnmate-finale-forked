@@ -23,7 +23,6 @@ import {
 import { User } from 'firebase/auth';
 import { StudyDocument, LearnMateNotification, StudentAcademicProfile } from '../types/study';
 import { EXAM_BLUEPRINTS } from '../utils/examSimulatorEngine';
-import { StudyTimerFocusBar } from './StudyTimerFocusBar';
 import { CompactStudyUtilitiesWidget } from './CompactStudyUtilitiesWidget';
 
 export type ActiveTab =
@@ -208,17 +207,6 @@ export const Navbar: React.FC<NavbarProps> = ({
 
         {/* Right: Dynamic-Island Timer, Study Tools, Notification Bell & Student Profile Pill */}
         <div className="flex items-center gap-2 shrink-0">
-          {/* Compact Dynamic-Island Focus Timer */}
-          <div className="hidden sm:block">
-            <StudyTimerFocusBar
-              activeDocumentId={activeDoc?.id || 'default'}
-              activeDocumentTitle={activeDoc?.title || 'Study Session'}
-              focusMode={focusMode}
-              onToggleFocusMode={onToggleFocusMode}
-              floatingIsland
-            />
-          </div>
-
           {/* Study Tools Modal Trigger (Image 5) */}
           <CompactStudyUtilitiesWidget activeDocument={activeDoc} />
 
