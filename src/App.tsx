@@ -320,6 +320,11 @@ export function App() {
 
   return (
     <div className="min-h-screen flex flex-col bg-[#FCFBF9] text-[#121827] pt-16">
+      {/* Glassmorphic Top Strip behind Dynamic Island */}
+      <div
+        className="fixed top-0 left-0 right-0 h-16 z-30 bg-[#FCFBF9]/65 dark:bg-[#121827]/65 backdrop-blur-xl border-b border-[#E8E6E2]/50 dark:border-white/10 shadow-[0_4px_20px_rgba(0,0,0,0.02)] pointer-events-none transition-colors"
+        aria-hidden="true"
+      />
       <DynamicCompanion activeDoc={effectiveDoc} />
       <Navbar
         activeTab={activeTab}

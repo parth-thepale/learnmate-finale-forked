@@ -192,7 +192,7 @@ export const DynamicCompanion: React.FC<DynamicCompanionProps> = ({ activeDoc })
           stiffness: 440,
           damping: 32,
         }}
-        className={`bg-black/95 dark:bg-zinc-900/95 text-white backdrop-blur-2xl border border-white/15 shadow-2xl shadow-black/70 overflow-hidden transition-colors ${
+        className={`bg-black/75 dark:bg-zinc-950/75 text-white backdrop-blur-2xl border border-white/20 shadow-[0_12px_40px_rgba(0,0,0,0.45)] ring-1 ring-white/10 overflow-hidden transition-colors ${
           mode === 'idle' ? 'rounded-full' : 'rounded-3xl'
         }`}
       >
