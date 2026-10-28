@@ -320,9 +320,9 @@ export function App() {
 
   return (
     <div className="min-h-screen flex flex-col bg-[#FCFBF9] text-[#121827] pt-16">
-      {/* Glassmorphic Top Strip behind Dynamic Island */}
+      {/* True Glassmorphic Top Strip (Clear frosted glass, no colored background) */}
       <div
-        className="fixed top-0 left-0 right-0 h-16 z-30 bg-[#FCFBF9]/65 dark:bg-[#121827]/65 backdrop-blur-xl border-b border-[#E8E6E2]/50 dark:border-white/10 shadow-[0_4px_20px_rgba(0,0,0,0.02)] pointer-events-none transition-colors"
+        className="fixed top-0 left-0 right-0 h-16 z-30 bg-white/10 dark:bg-white/[0.04] backdrop-blur-2xl backdrop-saturate-150 border-b border-black/[0.06] dark:border-white/[0.08] shadow-[0_4px_30px_rgba(0,0,0,0.02)] pointer-events-none transition-colors"
         aria-hidden="true"
       />
       <DynamicCompanion activeDoc={effectiveDoc} />
