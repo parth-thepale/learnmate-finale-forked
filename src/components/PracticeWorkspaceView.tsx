@@ -23,6 +23,7 @@ import {
 } from '../types/study';
 import { studyStorage } from '../services/storageService';
 import { aiStudyClient } from '../services/aiClient';
+import { QuizProctorOverlay } from './QuizProctorOverlay';
 
 interface PracticeWorkspaceViewProps {
   documents: StudyDocument[];
@@ -202,6 +203,11 @@ export const PracticeWorkspaceView: React.FC<PracticeWorkspaceViewProps> = ({
   }, [currentDoc]);
 
   const handleStartPracticeSet = async (focusWeakTopic?: string) => {
+    try {
+      if (!document.fullscreenElement) {
+        document.documentElement.requestFullscreen().catch(() => {});
+      }
+    } catch {}
     setSubmittedResult(null);
     const topicFilter = focusWeakTopic || (selectedTopicPill === 'All' ? undefined : selectedTopicPill);
     const initialSet = CANONICAL_PROBABILITY_QUESTIONS.slice(0, Math.max(5, questionCount));
@@ -1022,6 +1028,13 @@ export const PracticeWorkspaceView: React.FC<PracticeWorkspaceViewProps> = ({
           </div>
         </div>
       </div>
+
+      {/* Proctored Fullscreen Enforcement with 3 Warnings */}
+      <QuizProctorOverlay
+        isQuizActive={sessionActive && !submittedResult && questions.length > 0}
+        onAutoSubmit={handleSubmitSession}
+        quizTitle="Timed Practice Set"
+      />
     </div>
   );
 };

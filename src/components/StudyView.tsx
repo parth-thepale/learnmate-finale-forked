@@ -54,6 +54,7 @@ import { renderPdfPageToCanvas } from '../utils/pdfExtractor';
 import { VoiceTutorModal } from './VoiceTutorModal';
 import { QuickReviseView } from './QuickReviseView';
 import { ExploreFurtherView } from './ExploreFurtherView';
+import { QuizProctorOverlay } from './QuizProctorOverlay';
 
 export type StudySubMode =
   | 'explain'
@@ -588,6 +589,18 @@ export const StudyView: React.FC<StudyViewProps> = ({
   const studiedPct = Math.round(
     (Math.max(visitedPages.length, currentPage) / Math.max(1, activeDocument.pageCount)) * 100
   );
+
+  const isDiagnosticQuizActive =
+    subMode === 'quiz' &&
+    Boolean(activeDiagnosticQuestion) &&
+    !latestDiagnosticAttempt &&
+    !isGeneratingQuiz;
+
+  const isAdaptiveQuizActive =
+    subMode === 'adaptive' &&
+    Boolean(activeAdaptiveQuestion) &&
+    !latestAdaptiveAttempt &&
+    !isGeneratingAdaptive;
 
   const isPracticeGroup =
     subMode === 'quiz' ||
@@ -3569,6 +3582,18 @@ export const StudyView: React.FC<StudyViewProps> = ({
           <ArrowRight className="w-3.5 h-3.5" />
         </button>
       </div>
+
+      {/* Proctored Fullscreen Enforcement with 3 Warnings */}
+      <QuizProctorOverlay
+        isQuizActive={isDiagnosticQuizActive}
+        onAutoSubmit={() => void handleSubmitDiagnosticQuiz()}
+        quizTitle="Diagnostic Quiz"
+      />
+      <QuizProctorOverlay
+        isQuizActive={isAdaptiveQuizActive}
+        onAutoSubmit={() => void handleSubmitAdaptivePractice()}
+        quizTitle="Adaptive Practice Test"
+      />
 
       {/* Gemini Live Voice Tutor Modal */}
       <VoiceTutorModal
