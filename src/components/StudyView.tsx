@@ -932,7 +932,7 @@ export const StudyView: React.FC<StudyViewProps> = ({
                 !activeDocument.title.toLowerCase().includes('probability')) && (
                 <div className="pt-4 border-t border-[#F2F0EC] space-y-2">
                   <div className="text-xs font-semibold uppercase tracking-wider text-[#C84428]">
-                    Source {formatSourceReferenceLabel(activeDocument, currentPage)} —{' '}
+                    Source {formatSourceReferenceLabel(activeDocument, currentPage)} :{' '}
                     {activePageObj?.title}
                   </div>
                   <div className="text-sm text-[#2B3445] whitespace-pre-line leading-relaxed">
@@ -1853,7 +1853,7 @@ export const StudyView: React.FC<StudyViewProps> = ({
                   <div className="flex items-center justify-between">
                     <div>
                       <h3 className="text-sm font-bold text-[#172033]">
-                        Teach It Back — Feynman Active Recall
+                        Teach It Back: Feynman Active Recall
                       </h3>
                       <p className="text-xs text-[#64748B]">
                         Explain a concept in your own words. LearnMate evaluates what you got right and what you missed from your material.
@@ -2071,7 +2071,7 @@ export const StudyView: React.FC<StudyViewProps> = ({
                           <li>
                             For <em className="font-serif-editorial">A</em> to happen given{' '}
                             <em className="font-serif-editorial">B</em>, the outcome must be in{' '}
-                            <strong>both A and B</strong> — that&apos;s{' '}
+                            <strong>both A and B</strong>, which is{' '}
                             <span className="font-serif-editorial italic">A ∩ B</span>.
                           </li>
                           <li>
@@ -2127,7 +2127,7 @@ export const StudyView: React.FC<StudyViewProps> = ({
                             className="p-3 rounded-xl bg-[#FCFBF9] hover:bg-[#FBECE6]/40 border border-[#E8E6E2] text-left space-y-1 transition-colors cursor-pointer"
                           >
                             <div className="text-xs font-bold text-[#C84428]">
-                              Page 2 — Section 2.2
+                              Page 2: Section 2.2
                             </div>
                             <p className="text-[11px] text-[#606B7C] line-clamp-2">
                               “...the outcomes that are no longer possible are eliminated, and the
@@ -2141,7 +2141,7 @@ export const StudyView: React.FC<StudyViewProps> = ({
                             className="p-3 rounded-xl bg-[#FCFBF9] hover:bg-[#FBECE6]/40 border border-[#E8E6E2] text-left space-y-1 transition-colors cursor-pointer"
                           >
                             <div className="text-xs font-bold text-[#C84428]">
-                              Page 2 — Example 2.1
+                              Page 2: Example 2.1
                             </div>
                             <p className="text-[11px] text-[#606B7C] line-clamp-2">
                               “Consider rolling a fair six-sided die. Let A = &#123;2&#125;, B =
@@ -2284,7 +2284,7 @@ export const StudyView: React.FC<StudyViewProps> = ({
                                     >
                                       <div className="flex items-center justify-between">
                                         <span className="font-semibold text-[#172033]">
-                                          Page {cit.pageNumber} — {cit.section}
+                                          Page {cit.pageNumber} : {cit.section}
                                         </span>
                                         <button
                                           type="button"
@@ -3197,7 +3197,7 @@ export const StudyView: React.FC<StudyViewProps> = ({
                         >
                           <div className="flex items-center justify-between">
                             <span className="font-semibold text-[#172033]">
-                              Q{idx + 1} · {q.topic} — {isCorrect ? 'Correct ✓' : 'Missed ✗'}
+                              Q{idx + 1} · {q.topic} : {isCorrect ? 'Correct ✓' : 'Missed ✗'}
                             </span>
                             <button
                               type="button"

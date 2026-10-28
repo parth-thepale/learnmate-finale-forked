@@ -806,7 +806,7 @@ export const StudyTimerFocusBar: React.FC<StudyTimerFocusBarProps> = ({
       {/* Gentle Tab-Switch Focus Reminder */}
       {tabSwitchReminder && (
         <div className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-amber-50 border border-amber-200 text-xs font-medium text-amber-900">
-          <span>Stay focused on {activeDocumentTitle} — you switched tabs during your active timer.</span>
+          <span>Stay focused on {activeDocumentTitle} : you switched tabs during your active timer.</span>
           <button
             type="button"
             onClick={() => setTabSwitchReminder(false)}

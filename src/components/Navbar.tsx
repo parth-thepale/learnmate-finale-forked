@@ -277,6 +277,18 @@ export const Navbar: React.FC<NavbarProps> = ({
             )}
           </div>
 
+          {isAuthReady && !user && onLogin && (
+            <button
+              type="button"
+              onClick={onLogin}
+              data-testid="navbar-signin-direct-btn"
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-white hover:bg-[#F7F5F0] border border-[#E8E6E2] text-xs font-semibold text-[#121827] hover:text-[#C84428] transition-colors cursor-pointer shadow-2xs"
+            >
+              <LogIn className="w-3.5 h-3.5 text-[#C84428]" />
+              <span>Sign In</span>
+            </button>
+          )}
+
           <div className="hidden sm:block h-5 w-px bg-[#E8E6E2]" />
 
           {/* Student Profile Pill matching Screenshots ("S | Class 12 / JEE Main ▾") */}

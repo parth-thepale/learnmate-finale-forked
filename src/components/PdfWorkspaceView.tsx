@@ -329,7 +329,7 @@ export const PdfWorkspaceView: React.FC<PdfWorkspaceViewProps> = ({
         y: pt.y,
         width: 0.28,
         height: 0.08,
-        text: 'Key study note — click to edit in side panel',
+        text: 'Key study note: click to edit in side panel',
         createdAt: new Date().toISOString()
       };
       pushAnnotationState([...annotations, newNote]);
@@ -1333,14 +1333,14 @@ export const PdfWorkspaceView: React.FC<PdfWorkspaceViewProps> = ({
               </span>
               <span className="text-slate-500 hidden sm:inline">
                 {activeTool === 'highlight' || activeTool === 'underline'
-                  ? '— Select any text on the page or drag a region to mark it.'
+                  ? 'Select any text on the page or drag a region to mark it.'
                   : activeTool === 'pen'
-                  ? '— Click and drag directly on the page to write or sketch.'
+                  ? 'Click and drag directly on the page to write or sketch.'
                   : activeTool === 'text_note'
-                  ? '— Click anywhere on the page to pin a structured study note.'
+                  ? 'Click anywhere on the page to pin a structured study note.'
                   : activeTool === 'eraser'
-                  ? '— Click any highlight, drawing, or shape to remove it cleanly.'
-                  : '— Click any annotation to inspect or edit its note.'}
+                  ? 'Click any highlight, drawing, or shape to remove it cleanly.'
+                  : 'Click any annotation to inspect or edit its note.'}
               </span>
             </div>
             <span className="font-mono text-[11px] text-slate-500">

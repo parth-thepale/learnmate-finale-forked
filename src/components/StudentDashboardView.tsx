@@ -142,14 +142,14 @@ export const StudentDashboardView: React.FC<StudentDashboardViewProps> = ({
         ? 'Today'
         : idx === 1
         ? 'Recent'
-        : '—';
+        : 'Not yet';
 
       return {
         id: topic.id,
         name: topic.name,
         progressPct: pct,
         status,
-        lastStudied: status === 'Not Started' ? '—' : lastTimestamp,
+        lastStudied: status === 'Not Started' ? 'Not yet' : lastTimestamp,
       };
     });
   }, [currentDoc, attempts]);
@@ -319,7 +319,7 @@ export const StudentDashboardView: React.FC<StudentDashboardViewProps> = ({
         <div className="p-4 flex flex-col justify-center">
           <div className="text-[11px] text-[#606B7C]">Quiz Accuracy</div>
           <div className="font-serif-editorial font-bold text-xl text-[#121827] tabular-nums">
-            {quizAccuracy !== null ? `${quizAccuracy}%` : '—'}
+            {quizAccuracy !== null ? `${quizAccuracy}%` : 'N/A'}
           </div>
           <div className="text-[11px] text-[#606B7C]">
             {attempts.length > 0

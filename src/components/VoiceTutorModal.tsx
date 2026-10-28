@@ -531,7 +531,7 @@ export const VoiceTutorModal: React.FC<VoiceTutorModalProps> = ({
       setIsMicMuted(false);
       isMicMutedRef.current = false;
       updateVoiceState('listening');
-      setStatusNote('Microphone active — speak naturally or use a prompt below.');
+      setStatusNote('Microphone active: speak naturally or choose a topic prompt.');
     } catch (err) {
       const errName = err instanceof Error ? err.name : '';
       if (errName === 'NotFoundError' || errName === 'DevicesNotFoundError') {

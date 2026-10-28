@@ -144,7 +144,7 @@ export const ExploreFurtherView: React.FC<ExploreFurtherViewProps> = ({
         <div>
           <h2 className="text-xl font-bold text-[#172033] flex items-center gap-2">
             <Youtube className="w-5 h-5 text-[#EA4335]" />
-            <span>Explore Further — YouTube Learning Recommendations</span>
+            <span>Explore Further: YouTube Recommendations</span>
           </h2>
           <p className="text-xs sm:text-sm text-[#64748B]">
             Concept-specific educational tutorials ranked by relevance, channel authority, and duration.

@@ -557,7 +557,7 @@ export const PracticeWorkspaceView: React.FC<PracticeWorkspaceViewProps> = ({
     attempts.length > 0
       ? attempts.slice(0, 4).map((att) => ({
           id: att.id,
-          title: `${att.documentTitle.replace(/\.pdf$/i, '')} — Custom Set`,
+          title: `${att.documentTitle.replace(/\.pdf$/i, '')}: Custom Set`,
           meta: `${att.totalQuestions} questions · Mixed · ${new Date(
             att.completedAt
           ).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`,
@@ -566,7 +566,7 @@ export const PracticeWorkspaceView: React.FC<PracticeWorkspaceViewProps> = ({
       : [
           {
             id: 'sample-att-1',
-            title: 'Probability — Custom Set',
+            title: 'Probability: Custom Set',
             meta: '10 questions · Mixed · 18 mins · Yesterday',
             pct: 80,
           },

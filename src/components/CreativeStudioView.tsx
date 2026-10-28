@@ -84,7 +84,7 @@ export const CreativeStudioView: React.FC<CreativeStudioViewProps> = ({
   const [saveToast, setSaveToast] = useState<string | null>(null);
 
   // Image 6 Scan Notes state
-  const [scannedDocTitle, setScannedDocTitle] = useState('Probability Notes — Lecture 3');
+  const [scannedDocTitle, setScannedDocTitle] = useState('Probability Notes: Lecture 3');
   const [scannedUploadedPreview, setScannedUploadedPreview] = useState<string | null>(null);
   const [isScanningOcr, setIsScanningOcr] = useState(false);
   const [cleanedNotesSections, setCleanedNotesSections] = useState<
@@ -1788,7 +1788,7 @@ export const CreativeStudioView: React.FC<CreativeStudioViewProps> = ({
                 <div className="p-5 rounded-2xl bg-slate-900 text-white border border-slate-800 space-y-4">
                   <div className="flex items-center justify-between">
                     <span className="text-xs font-bold uppercase tracking-wider text-sky-400">
-                      2D Exact Coordinate Plot — {sceneSpec.title}
+                      2D Exact Coordinate Plot: {sceneSpec.title}
                     </span>
                     <span className="text-xs font-mono text-amber-300">
                       {sceneSpec.governingEquations[0]}
@@ -1866,7 +1866,7 @@ export const CreativeStudioView: React.FC<CreativeStudioViewProps> = ({
                   {sceneCategory === 'chemistry_vsepr_3d' && (
                     <div className="p-4 rounded-xl bg-slate-950 border border-slate-800 space-y-2">
                       <div className="text-base font-bold text-white">
-                        {activeVseprMolecule.name} ({activeVseprMolecule.formula}) —{' '}
+                        {activeVseprMolecule.name} ({activeVseprMolecule.formula}) :{' '}
                         <span className="text-emerald-400">{activeVseprMolecule.geometryName}</span>
                       </div>
                       <p className="text-xs text-slate-300">{activeVseprMolecule.description}</p>
@@ -2033,7 +2033,7 @@ export const CreativeStudioView: React.FC<CreativeStudioViewProps> = ({
                 No-Code Student Mini App Builder
               </h2>
               <p className="text-xs text-[#64748B]">
-                Describe a calculator, solver, quiz app, or revision planner in plain English — or pick a template below, customize it, and save it to your library.
+                Describe a calculator, solver, quiz app, or revision planner in plain English, or pick a template below, customize it, and save it to your library.
               </p>
             </div>
 
@@ -2221,7 +2221,7 @@ export const CreativeStudioView: React.FC<CreativeStudioViewProps> = ({
                           <p className="text-[11px] text-[#64748B] mt-0.5">{out.description}</p>
                         </div>
                         <div className="text-lg font-extrabold text-[#1A73E8] font-mono shrink-0">
-                          {computed ? computed.formatted : '—'}
+                          {computed ? computed.formatted : 'N/A'}
                         </div>
                       </div>
                     );
@@ -2348,7 +2348,7 @@ export const CreativeStudioView: React.FC<CreativeStudioViewProps> = ({
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div>
               <h2 className="text-lg font-bold text-[#172033]">
-                Visualize Concept — AI Image & Deterministic Scientific Diagrams
+                Visualize Concept: Scientific Diagrams & Renderings
               </h2>
               <p className="text-xs text-[#64748B]">
                 Generates grounded educational diagrams for your chapter concepts.
