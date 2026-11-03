@@ -13,6 +13,8 @@ import { ProgressView } from './components/ProgressView';
 import { VoiceTutorModal } from './components/VoiceTutorModal';
 import { NotebookAndScannerModal } from './components/NotebookAndScannerModal';
 import { DynamicCompanion } from './components/DynamicCompanion';
+import { SignOutDialog } from './components/SignOutDialog';
+import { performSignOut, prepareSignOutSummary, type SignOutChoice, type SignOutSummary } from './services/signOutFlow';
 import { isFeatureEnabled, isTabAvailable } from './config/launchFeatures';
 import {
   StudyDocument,
@@ -96,6 +98,9 @@ export function App() {
 
   // Firebase Auth & Sync State
   const [user, setUser] = useState<User | null>(null);
+  const [signOutSummary, setSignOutSummary] = useState<SignOutSummary | null>(null);
+  const [signOutBusy, setSignOutBusy] = useState(false);
+  const [signOutError, setSignOutError] = useState<string | null>(null);
   const [isAuthReady, setIsAuthReady] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
   const [syncSnapshot, setSyncSnapshot] = useState<SyncSnapshot>(() => studyStorage.getSyncSnapshot());
@@ -176,42 +181,37 @@ export function App() {
     };
   }, [loadStateFromStorage]);
 
+  // Explicit sign-out asks what to do with this account's local data (keep is the default).
   const handleLogout = async () => {
-    await studyStorage.flushPendingWrites();
-    const unsynced = studyStorage.getUnsyncedChangeCount();
-    const deviceOnly = studyStorage.getDeviceOnlyDataSummary();
-    const deviceOnlyItems =
-      deviceOnly.notebookEntries +
-      deviceOnly.plannerTasks +
-      deviceOnly.annotatedDocuments +
-      deviceOnly.focusSessions +
-      deviceOnly.creativeAssets +
-      deviceOnly.studySessions;
-
-    if (unsynced > 0 || deviceOnlyItems > 0) {
-      const warnings: string[] = [];
-      if (unsynced > 0) {
-        warnings.push(
-          `${unsynced} change${unsynced === 1 ? ' has' : 's have'} not been saved to your account yet.`
-        );
-      }
-      if (deviceOnlyItems > 0) {
-        warnings.push(
-          `Notebook entries, planner tasks, PDF annotations${
-            deviceOnly.studySessions > 0 ? ', study sessions' : ''
-          } and focus history are stored only on this device.`
-        );
-      }
-      const confirmed = window.confirm(
-        `${warnings.join('\n')}\n\nSigning out removes your study data from this device. Sign out anyway?`
-      );
-      if (!confirmed) return;
-    }
-
-    // Remove this account's private data from the device before ending the session.
-    studyStorage.clearCurrentAccountFromDevice();
-    await signOutUser();
+    if (!user) return;
+    setSignOutError(null);
+    setSignOutSummary(await prepareSignOutSummary(studyStorage, user));
   };
+
+  const handleSignOutChoice = useCallback(
+    async (choice: SignOutChoice) => {
+      if (!signOutSummary) return;
+      if (choice === 'cancel') {
+        setSignOutSummary(null);
+        return;
+      }
+      setSignOutBusy(true);
+      setSignOutError(null);
+      const result = await performSignOut({ choice, uid: signOutSummary.uid, storage: studyStorage, signOut: signOutUser });
+      setSignOutBusy(false);
+      if (result.status === 'failed') {
+        setSignOutError(result.error);
+        return;
+      }
+      setSignOutSummary(null);
+    },
+    [signOutSummary]
+  );
+
+  // If the account changes while the dialog is open (e.g. signed out in another tab), close it.
+  useEffect(() => {
+    if (signOutSummary && !signOutBusy && user?.uid !== signOutSummary.uid) setSignOutSummary(null);
+  }, [user, signOutSummary, signOutBusy]);
 
   const refreshDocumentsState = () => {
     const refreshed = studyStorage.getDocuments();
@@ -663,6 +663,10 @@ export function App() {
           handleSelectTab('study');
         }}
       />
+      )}
+
+      {signOutSummary && (
+        <SignOutDialog summary={signOutSummary} busy={signOutBusy} error={signOutError} onChoose={handleSignOutChoice} />
       )}
     </div>
   );

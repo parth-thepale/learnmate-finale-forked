@@ -177,6 +177,11 @@ export interface IStudyStorageRepository {
   getDeviceOnlyDataSummary(): DeviceOnlyDataSummary;
   /** Removes the signed-in account's private data from this device (explicit sign-out). */
   clearCurrentAccountFromDevice(): void;
+  /**
+   * Deletes one signed-in account's private local data (its scope only) from this device. Never
+   * touches the guest scope or other accounts. Returns the number of storage entries removed.
+   */
+  removeAccountDataFromDevice(uid: string): number;
   getActiveScope(): LocalScope | null;
   getLastLegacyMigration(): LegacyMigrationResult | null;
   subscribe(listener: () => void): () => void;
@@ -611,6 +616,26 @@ export class HybridCloudStudyRepository implements IStudyStorageRepository {
     clearScope(this.storage, scope);
     this.sync.setSignedIn(false);
     this.notifyListeners();
+  }
+
+  removeAccountDataFromDevice(uid: string): number {
+    if (!this.storage) return 0;
+    const target = scopeForUid(uid);
+    if (target === 'guest') throw new Error('Refusing to remove guest data as an account.');
+    if (this.scope === target) {
+      // Still active: detach first so nothing is written back into the scope being removed.
+      this.unsubscribeCloudListeners();
+      this.generation++;
+      this.writeQueues.clear();
+      this.chunkCounts.clear();
+      this.studySessionsConfirmed.clear();
+      this.currentUser = null;
+      this.scope = null;
+      this.sync.setSignedIn(false);
+    }
+    const removed = clearScope(this.storage, target);
+    this.notifyListeners();
+    return removed;
   }
 
   async flushPendingWrites(timeoutMs = 8_000): Promise<void> {
