@@ -42,9 +42,59 @@ import {
   generateProcedural3DScene,
 } from './src/utils/ai3dModelEngine.ts';
 import type { Custom3DSceneSpec } from './src/types/study.ts';
+import { isFeatureEnabled } from './src/config/launchFeatures.ts';
+import { authenticateBearer, type IdTokenVerifier } from './src/server/authMiddleware.ts';
+import {
+  createApiAccessControl,
+  jsonBodyErrorHandler,
+  MEDIA_BODY_PATHS,
+} from './src/server/apiAccessControl.ts';
+import { initServerFirebaseAdmin } from './src/server/firebaseAdmin.ts';
+import {
+  clientIpFromForwarded,
+  isOriginAllowed,
+  LIVE_SOCKET_LIMITS,
+  LiveSessionRegistry,
+  parseAllowedOrigins,
+} from './src/server/liveSocketGuard.ts';
+import { QuotaUnavailableError, type DailyQuotaStore } from './src/server/quotaStore.ts';
+import { FixedWindowRateLimiter } from './src/server/rateLimiter.ts';
+import { REQUEST_LIMITS } from './src/server/requestValidation.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
+function readPositiveIntEnv(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (!raw || !raw.trim()) return fallback;
+  const parsed = Number(raw);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function readNonNegativeIntEnv(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (!raw || !raw.trim()) return fallback;
+  const parsed = Number(raw);
+  return Number.isInteger(parsed) && parsed >= 0 ? parsed : fallback;
+}
+
+const IS_PRODUCTION = process.env.NODE_ENV === 'production';
+const SECURITY_CONFIG = {
+  // Daily AI usage units per user (resets at midnight IST). See API_ROUTE_POLICIES for unit costs.
+  aiDailyUnitLimit: readPositiveIntEnv('AI_DAILY_UNIT_LIMIT', 120),
+  aiUserRequestsPerMinute: readPositiveIntEnv('AI_USER_REQUESTS_PER_MINUTE', 15),
+  apiIpRequestsPerMinute: readPositiveIntEnv('API_IP_REQUESTS_PER_MINUTE', 120),
+  // Number of reverse-proxy hops in front of the app (Render: verify before launch).
+  trustProxyHops: readNonNegativeIntEnv('TRUST_PROXY_HOPS', 1),
+  diagnosticsEnabled: process.env.ENABLE_INTERNAL_DIAGNOSTICS === 'true',
+  adminUids: new Set(
+    (process.env.ADMIN_UIDS || '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean)
+  ),
+  allowedOrigins: parseAllowedOrigins(process.env),
+};
 
 function loadDefaultFirebaseProjectId(): string {
   try {
@@ -979,20 +1029,59 @@ function buildGroundedFallbackQuiz(
 /**
  * Sets up the Gemini Live Voice Tutor WebSocket bridge (/api/live) using model 'gemini-3.8-live'.
  */
-function attachGeminiLiveWebSocketServer(httpServer: http.Server) {
-  const wss = new WebSocketServer({ noServer: true });
+function rejectUpgrade(socket: import('stream').Duplex, status: number, reason: string) {
+  try {
+    socket.write(`HTTP/1.1 ${status} ${reason}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`);
+  } catch {
+    // ignore
+  }
+  socket.destroy();
+}
+
+function attachGeminiLiveWebSocketServer(
+  httpServer: http.Server,
+  deps: {
+    verifyIdToken: IdTokenVerifier;
+    quotaStore: DailyQuotaStore;
+    ipLimiter: FixedWindowRateLimiter;
+    dailyUnitLimit: number;
+    allowedOrigins: ReadonlySet<string>;
+    trustProxyHops: number;
+  }
+) {
+  const wss = new WebSocketServer({ noServer: true, maxPayload: LIVE_SOCKET_LIMITS.maxPayloadBytes });
+  const sessionRegistry = new LiveSessionRegistry();
 
   httpServer.on('upgrade', (request, socket, head) => {
+    let pathname = '';
     try {
-      const url = new URL(request.url || '/', `http://${request.headers.host || 'localhost'}`);
-      if (url.pathname === '/api/live') {
-        wss.handleUpgrade(request, socket, head, (ws) => {
-          wss.emit('connection', ws, request);
-        });
-      }
+      pathname = new URL(request.url || '/', 'http://localhost').pathname;
     } catch {
-      // ignore non-live upgrades (e.g. Vite HMR)
+      return;
     }
+    // Leave other upgrades (e.g. Vite HMR in development) to their own handlers.
+    if (pathname !== '/api/live') return;
+
+    if (!isFeatureEnabled('liveVoice')) {
+      rejectUpgrade(socket, 404, 'Not Found');
+      return;
+    }
+    if (!isOriginAllowed(request.headers.origin, request.headers.host, deps.allowedOrigins)) {
+      rejectUpgrade(socket, 403, 'Forbidden');
+      return;
+    }
+    const ip = clientIpFromForwarded(
+      request.headers['x-forwarded-for'],
+      request.socket.remoteAddress,
+      deps.trustProxyHops
+    );
+    if (!deps.ipLimiter.hit(`ip:${ip}`).allowed) {
+      rejectUpgrade(socket, 429, 'Too Many Requests');
+      return;
+    }
+    wss.handleUpgrade(request, socket, head, (ws) => {
+      wss.emit('connection', ws, request);
+    });
   });
 
   wss.on('connection', (clientWs: WebSocket) => {
@@ -1001,6 +1090,9 @@ function attachGeminiLiveWebSocketServer(httpServer: http.Server) {
     let sessionPages: PageInput[] = [];
     let sessionTitle = 'Study Material';
     let sessionWeakTopics: string[] = [];
+    let authenticatedUid: string | null = null;
+    let authInProgress = false;
+    let maxDurationTimer: NodeJS.Timeout | null = null;
 
     const safeSend = (payload: Record<string, unknown>) => {
       if (clientWs.readyState === WebSocket.OPEN) {
@@ -1008,10 +1100,27 @@ function attachGeminiLiveWebSocketServer(httpServer: http.Server) {
       }
     };
 
+    const closeLiveSession = () => {
+      if (liveSession && typeof liveSession.close === 'function') {
+        try {
+          liveSession.close();
+        } catch {
+          // ignore
+        }
+      }
+      liveSession = null;
+    };
+
+    // Unauthenticated sockets are closed quickly so they cannot hold server resources.
+    const authTimer = setTimeout(() => {
+      if (!authenticatedUid) clientWs.close(4401, 'Authentication required');
+    }, LIVE_SOCKET_LIMITS.authTimeoutMs);
+
     clientWs.on('message', async (rawBuffer) => {
       try {
         const msg = JSON.parse(rawBuffer.toString()) as {
           type: string;
+          token?: string;
           title?: string;
           pages?: PageInput[];
           weakTopics?: string[];
@@ -1020,10 +1129,56 @@ function attachGeminiLiveWebSocketServer(httpServer: http.Server) {
           question?: string;
         };
 
+        if (!authenticatedUid) {
+          if (msg.type !== 'auth' || authInProgress) {
+            clientWs.close(4401, 'Authentication required');
+            return;
+          }
+          authInProgress = true;
+          const outcome = await authenticateBearer({ token: msg.token }, deps.verifyIdToken);
+          if (!outcome.ok) {
+            safeSend({ type: 'auth_error', code: outcome.failure.code, message: outcome.failure.message });
+            clientWs.close(outcome.failure.status === 503 ? 1013 : 4401, outcome.failure.code);
+            return;
+          }
+          const uid = outcome.identity.uid;
+          if (!sessionRegistry.tryAcquire(uid)) {
+            safeSend({ type: 'auth_error', code: 'session_limit', message: 'A voice session is already active.' });
+            clientWs.close(4409, 'session_limit');
+            return;
+          }
+          try {
+            const quota = await deps.quotaStore.consume(uid, LIVE_SOCKET_LIMITS.sessionQuotaUnits, deps.dailyUnitLimit);
+            if (!quota.allowed) {
+              sessionRegistry.release(uid);
+              safeSend({ type: 'auth_error', code: 'daily_quota_exceeded', message: "You've reached today's AI usage limit." });
+              clientWs.close(4429, 'daily_quota_exceeded');
+              return;
+            }
+          } catch (err) {
+            sessionRegistry.release(uid);
+            if (!(err instanceof QuotaUnavailableError)) console.warn('[live] quota error');
+            safeSend({ type: 'auth_error', code: 'quota_unavailable', message: 'Voice tutor is temporarily unavailable.' });
+            clientWs.close(1013, 'quota_unavailable');
+            return;
+          }
+          authenticatedUid = uid;
+          clearTimeout(authTimer);
+          maxDurationTimer = setTimeout(() => {
+            safeSend({ type: 'status', state: 'session_expired', message: 'Voice session time limit reached.' });
+            clientWs.close(1000, 'session_time_limit');
+          }, LIVE_SOCKET_LIMITS.maxSessionMs);
+          safeSend({ type: 'auth_ok' });
+          return;
+        }
+
         if (msg.type === 'setup') {
-          sessionTitle = msg.title || 'Study Material';
-          sessionPages = Array.isArray(msg.pages) ? msg.pages : [];
-          sessionWeakTopics = Array.isArray(msg.weakTopics) ? msg.weakTopics : [];
+          closeLiveSession();
+          sessionTitle = typeof msg.title === 'string' ? msg.title.slice(0, REQUEST_LIMITS.maxTitleChars) : 'Study Material';
+          sessionPages = Array.isArray(msg.pages) ? msg.pages.slice(0, REQUEST_LIMITS.maxPages) : [];
+          sessionWeakTopics = Array.isArray(msg.weakTopics)
+            ? msg.weakTopics.filter((t): t is string => typeof t === 'string').slice(0, 20).map((t) => t.slice(0, 200))
+            : [];
 
           const ai = getGenAIClient();
           if (!ai) {
@@ -1116,14 +1271,11 @@ Rules for Voice Tutoring:
                     safeSend({ type: 'turn_complete' });
                   }
                 },
-                onerror: (err: unknown) => {
+                onerror: () => {
                   safeSend({
                     type: 'status',
                     state: 'fallback_ready',
-                    message:
-                      err instanceof Error
-                        ? err.message
-                        : 'Gemini Live stream switched to grounded voice synthesis.',
+                    message: 'Gemini Live stream switched to grounded voice synthesis.',
                   });
                 },
                 onclose: () => {
@@ -1137,13 +1289,12 @@ Rules for Voice Tutoring:
             );
 
             liveSession = await Promise.race([connectPromise, timeoutPromise]);
-          } catch (err) {
+          } catch {
             liveSession = null;
             safeSend({
               type: 'status',
               state: 'fallback_ready',
-              message:
-                err instanceof Error ? err.message : 'Live audio stream unavailable; using grounded voice mode.',
+              message: 'Live audio stream unavailable; using grounded voice mode.',
             });
           }
           return;
@@ -1163,8 +1314,8 @@ Rules for Voice Tutoring:
           return;
         }
 
-        if (msg.type === 'voice_question' && msg.question) {
-          const qText = msg.question.trim();
+        if (msg.type === 'voice_question' && typeof msg.question === 'string') {
+          const qText = msg.question.trim().slice(0, REQUEST_LIMITS.maxQuestionChars);
           if (!qText) return;
 
           if (liveSession) {
@@ -1207,21 +1358,70 @@ Rules for Voice Tutoring:
     });
 
     clientWs.on('close', () => {
-      if (liveSession && typeof liveSession.close === 'function') {
-        try {
-          liveSession.close();
-        } catch {
-          // ignore
-        }
+      clearTimeout(authTimer);
+      if (maxDurationTimer) clearTimeout(maxDurationTimer);
+      closeLiveSession();
+      if (authenticatedUid) {
+        sessionRegistry.release(authenticatedUid);
+        authenticatedUid = null;
       }
-      liveSession = null;
     });
   });
 }
 
 async function startServer() {
   const app = express();
-  app.use(express.json({ limit: '15mb' }));
+  app.disable('x-powered-by');
+  app.set('trust proxy', SECURITY_CONFIG.trustProxyHops);
+  app.use((_req, res, next) => {
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+    next();
+  });
+
+  const firebaseAdmin = initServerFirebaseAdmin({
+    env: process.env,
+    rootDir: __dirname,
+    isProduction: IS_PRODUCTION,
+  });
+  for (const warning of firebaseAdmin.config.warnings) {
+    console.warn(`[security] ${warning}`);
+  }
+  console.log(
+    `[security] firebase-admin project=${firebaseAdmin.config.projectId || 'unset'} credentials=${firebaseAdmin.config.mode} quotaStore=${firebaseAdmin.quotaStore.kind} dailyUnits=${SECURITY_CONFIG.aiDailyUnitLimit}`
+  );
+  if (firebaseAdmin.quotaStore.kind === 'unavailable') {
+    console.error(
+      '[security] AI endpoints will return 503 until Firebase Admin credentials are configured (FIREBASE_SERVICE_ACCOUNT_JSON or GOOGLE_APPLICATION_CREDENTIALS).'
+    );
+  } else if (firebaseAdmin.quotaStore.kind === 'memory') {
+    console.warn('[security] Using in-memory quota store (development only; not durable).');
+  }
+
+  const ipLimiter = new FixedWindowRateLimiter({
+    windowMs: 60_000,
+    max: SECURITY_CONFIG.apiIpRequestsPerMinute,
+  });
+  const userLimiter = new FixedWindowRateLimiter({
+    windowMs: 60_000,
+    max: SECURITY_CONFIG.aiUserRequestsPerMinute,
+  });
+  const accessControl = createApiAccessControl({
+    verifyIdToken: firebaseAdmin.verifyIdToken,
+    quotaStore: firebaseAdmin.quotaStore,
+    ipLimiter,
+    userLimiter,
+    dailyUnitLimit: SECURITY_CONFIG.aiDailyUnitLimit,
+    isFeatureEnabled,
+    diagnosticsEnabled: SECURITY_CONFIG.diagnosticsEnabled,
+    adminUids: SECURITY_CONFIG.adminUids,
+  });
+
+  // Guards run before body parsing so unauthenticated requests never have large bodies parsed.
+  app.use(accessControl.beforeBody);
+  app.use(MEDIA_BODY_PATHS, express.json({ limit: REQUEST_LIMITS.mediaJsonBody }));
+  app.use(express.json({ limit: REQUEST_LIMITS.defaultJsonBody }));
+  app.use(accessControl.afterBody);
 
   app.get('/api/health', (_req, res) => {
     res.json({ status: 'ok', timestamp: new Date().toISOString() });
@@ -3962,8 +4162,17 @@ Never output markdown fences or commentary outside the JSON.`;
     });
   }
 
+  app.use(jsonBodyErrorHandler);
+
   const httpServer = http.createServer(app);
-  attachGeminiLiveWebSocketServer(httpServer);
+  attachGeminiLiveWebSocketServer(httpServer, {
+    verifyIdToken: firebaseAdmin.verifyIdToken,
+    quotaStore: firebaseAdmin.quotaStore,
+    ipLimiter,
+    dailyUnitLimit: SECURITY_CONFIG.aiDailyUnitLimit,
+    allowedOrigins: SECURITY_CONFIG.allowedOrigins,
+    trustProxyHops: SECURITY_CONFIG.trustProxyHops,
+  });
 
   httpServer.listen(PORT, '0.0.0.0', () => {
     console.log(`LearnMate full-stack server running on http://localhost:${PORT}`);
