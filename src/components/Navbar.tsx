@@ -20,6 +20,7 @@ import {
   Target,
   Home,
 } from 'lucide-react';
+import { isTabAvailable } from '../config/launchFeatures';
 import { User } from 'firebase/auth';
 import { StudyDocument, LearnMateNotification, StudentAcademicProfile } from '../types/study';
 import { EXAM_BLUEPRINTS } from '../utils/examSimulatorEngine';
@@ -114,7 +115,7 @@ export const Navbar: React.FC<NavbarProps> = ({
   }, []);
 
   // Canonical 7 Top-Bar Destinations from the 10 Editorial Reference Screenshots
-  const navItems: {
+  const allNavItems: {
     id: ActiveTab;
     label: string;
     icon: React.ComponentType<{ className?: string }>;
@@ -127,6 +128,7 @@ export const Navbar: React.FC<NavbarProps> = ({
     { id: 'ai-tutor', label: 'AI Tutor', icon: MessageSquare },
     { id: 'create', label: 'Create', icon: PlaySquare },
   ];
+  const navItems = allNavItems.filter((item) => isTabAvailable(item.id));
 
   const unreadCount = notifications.filter((n) => !n.read).length;
 

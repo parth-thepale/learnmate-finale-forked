@@ -21,6 +21,7 @@ import {
 import type { StudyDocument } from '../types/study';
 import type { ActiveTab } from './Navbar';
 import type { StudySubMode } from './StudyView';
+import { isTabAvailable } from '../config/launchFeatures';
 
 interface HomeViewProps {
   documents: StudyDocument[];
@@ -159,14 +160,16 @@ export const HomeView: React.FC<HomeViewProps> = ({
               <Mic className="w-3.5 h-3.5 text-[#C84428]" />
               <span>Record Voice Lecture</span>
             </button>
-            <button
-              type="button"
-              onClick={() => onNavigateTab('explore')}
-              className="inline-flex items-center gap-2 px-3.5 py-2 rounded-lg bg-white hover:bg-[#F7F5F0] border border-[#E8E6E2] text-xs font-semibold text-[#121827] transition-colors cursor-pointer"
-            >
-              <Compass className="w-3.5 h-3.5 text-[#2E7D52]" />
-              <span>Research Papers &amp; Courses</span>
-            </button>
+            {isTabAvailable('explore') && (
+              <button
+                type="button"
+                onClick={() => onNavigateTab('explore')}
+                className="inline-flex items-center gap-2 px-3.5 py-2 rounded-lg bg-white hover:bg-[#F7F5F0] border border-[#E8E6E2] text-xs font-semibold text-[#121827] transition-colors cursor-pointer"
+              >
+                <Compass className="w-3.5 h-3.5 text-[#2E7D52]" />
+                <span>Research Papers &amp; Courses</span>
+              </button>
+            )}
 
             {documents.length > 0 && (
               <button
@@ -539,29 +542,31 @@ export const HomeView: React.FC<HomeViewProps> = ({
             </button>
 
             {/* 4. Explore & Research */}
-            <button
-              type="button"
-              onClick={() => onNavigateTab('explore')}
-              className="group text-left rounded-xl bg-white border border-[#E8E6E2] p-5 hover:border-[#2563EB]/60 transition-all shadow-xs cursor-pointer flex flex-col justify-between space-y-4"
-            >
-              <div className="space-y-3">
-                <div className="w-10 h-10 rounded-lg bg-[#EFF6FF] text-[#2563EB] flex items-center justify-center">
-                  <Compass className="w-5 h-5" />
+            {isTabAvailable('explore') && (
+              <button
+                type="button"
+                onClick={() => onNavigateTab('explore')}
+                className="group text-left rounded-xl bg-white border border-[#E8E6E2] p-5 hover:border-[#2563EB]/60 transition-all shadow-xs cursor-pointer flex flex-col justify-between space-y-4"
+              >
+                <div className="space-y-3">
+                  <div className="w-10 h-10 rounded-lg bg-[#EFF6FF] text-[#2563EB] flex items-center justify-center">
+                    <Compass className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <h3 className="font-serif-editorial text-base font-bold text-[#121827] group-hover:text-[#2563EB] transition-colors">
+                      Explore &amp; Research
+                    </h3>
+                    <p className="text-xs text-[#606B7C] leading-relaxed mt-1">
+                      Daily student newspaper, ArXiv papers, OpenAlex search, and campus study maps.
+                    </p>
+                  </div>
                 </div>
-                <div>
-                  <h3 className="font-serif-editorial text-base font-bold text-[#121827] group-hover:text-[#2563EB] transition-colors">
-                    Explore &amp; Research
-                  </h3>
-                  <p className="text-xs text-[#606B7C] leading-relaxed mt-1">
-                    Daily student newspaper, ArXiv papers, OpenAlex search, and campus study maps.
-                  </p>
-                </div>
-              </div>
-              <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-[#2563EB]">
-                <span>Browse Library</span>
-                <ChevronRight className="w-3 h-3 group-hover:translate-x-0.5 transition-transform" />
-              </span>
-            </button>
+                <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-[#2563EB]">
+                  <span>Browse Library</span>
+                  <ChevronRight className="w-3 h-3 group-hover:translate-x-0.5 transition-transform" />
+                </span>
+              </button>
+            )}
           </div>
         </section>
 

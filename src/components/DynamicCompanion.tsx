@@ -21,6 +21,7 @@ import { studyStorage } from '../services/storageService';
 import { computeTimerRemainingSeconds, formatTimestamp } from '../utils/quizGrading';
 import { aiStudyClient } from '../services/aiClient';
 import { LOFI_PRESETS, type LofiPresetOption } from './StudyTimerFocusBar';
+import { isFeatureEnabled } from '../config/launchFeatures';
 
 export type CompanionMode = 'idle' | 'pomodoro' | 'ai';
 
@@ -137,7 +138,7 @@ export const DynamicCompanion: React.FC<DynamicCompanionProps> = ({ activeDoc })
       }
     };
 
-    if (!lofiPlaying) {
+    if (!lofiPlaying || !isFeatureEnabled('lofi')) {
       stopAudio();
       return;
     }
@@ -510,18 +511,20 @@ export const DynamicCompanion: React.FC<DynamicCompanionProps> = ({ activeDoc })
             </button>
 
             {/* Quick Headphones Lo-Fi Trigger */}
-            <button
-              type="button"
-              onClick={() => setLofiPlaying((p) => !p)}
-              title={lofiPlaying ? 'Pause Focus Radio' : 'Play Focus Radio'}
-              className={`p-1 rounded-md transition-colors cursor-pointer ${
-                lofiPlaying
-                  ? 'bg-[#4285F4] text-white shadow-xs'
-                  : 'hover:bg-white/15 text-slate-300 hover:text-white'
-              }`}
-            >
-              <Headphones className="w-3 h-3" />
-            </button>
+            {isFeatureEnabled('lofi') && (
+              <button
+                type="button"
+                onClick={() => setLofiPlaying((p) => !p)}
+                title={lofiPlaying ? 'Pause Focus Radio' : 'Play Focus Radio'}
+                className={`p-1 rounded-md transition-colors cursor-pointer ${
+                  lofiPlaying
+                    ? 'bg-[#4285F4] text-white shadow-xs'
+                    : 'hover:bg-white/15 text-slate-300 hover:text-white'
+                }`}
+              >
+                <Headphones className="w-3 h-3" />
+              </button>
+            )}
 
             {/* Divider */}
             <div className="w-[1px] h-3.5 bg-white/20" />
@@ -643,57 +646,59 @@ export const DynamicCompanion: React.FC<DynamicCompanionProps> = ({ activeDoc })
             </div>
 
             {/* Lo-Fi Focus Radio (Deterministic Synth) */}
-            <div className="space-y-2 pt-1 border-t border-white/10">
-              <div className="flex items-center justify-between">
-                <span className="font-semibold text-slate-200 flex items-center gap-1.5">
-                  <Music className="w-3.5 h-3.5 text-[#FBBC05]" />
-                  <span>Focus Radio (Deterministic Synth)</span>
-                </span>
-                <span className="text-[10px] px-1.5 py-0.5 rounded bg-white/10 text-slate-300">
-                  {activePreset.bpm} BPM
-                </span>
-              </div>
+            {isFeatureEnabled('lofi') && (
+              <div className="space-y-2 pt-1 border-t border-white/10">
+                <div className="flex items-center justify-between">
+                  <span className="font-semibold text-slate-200 flex items-center gap-1.5">
+                    <Music className="w-3.5 h-3.5 text-[#FBBC05]" />
+                    <span>Focus Radio (Deterministic Synth)</span>
+                  </span>
+                  <span className="text-[10px] px-1.5 py-0.5 rounded bg-white/10 text-slate-300">
+                    {activePreset.bpm} BPM
+                  </span>
+                </div>
 
-              <p className="text-[10px] text-slate-400 leading-snug">
-                AI media generation requires configuration or paid model access. Playing warm Web Audio instrumental synth.
-              </p>
+                <p className="text-[10px] text-slate-400 leading-snug">
+                  AI media generation requires configuration or paid model access. Playing warm Web Audio instrumental synth.
+                </p>
 
-              {/* 6 Soundscapes Grid */}
-              <div className="grid grid-cols-2 gap-1.5">
-                {LOFI_PRESETS.map((preset) => (
-                  <button
-                    key={preset.id}
-                    type="button"
-                    onClick={() => {
-                      setActivePresetId(preset.id);
-                      setLofiPlaying(true);
-                    }}
-                    className={`text-left px-2 py-1.5 rounded-lg text-[11px] transition-colors cursor-pointer ${
-                      activePresetId === preset.id && lofiPlaying
-                        ? 'bg-[#4285F4]/30 border border-[#4285F4] text-white font-semibold'
-                        : 'bg-white/5 hover:bg-white/10 text-slate-300 border border-transparent'
-                    }`}
-                  >
-                    <div className="truncate">{preset.name}</div>
-                  </button>
-                ))}
-              </div>
+                {/* 6 Soundscapes Grid */}
+                <div className="grid grid-cols-2 gap-1.5">
+                  {LOFI_PRESETS.map((preset) => (
+                    <button
+                      key={preset.id}
+                      type="button"
+                      onClick={() => {
+                        setActivePresetId(preset.id);
+                        setLofiPlaying(true);
+                      }}
+                      className={`text-left px-2 py-1.5 rounded-lg text-[11px] transition-colors cursor-pointer ${
+                        activePresetId === preset.id && lofiPlaying
+                          ? 'bg-[#4285F4]/30 border border-[#4285F4] text-white font-semibold'
+                          : 'bg-white/5 hover:bg-white/10 text-slate-300 border border-transparent'
+                      }`}
+                    >
+                      <div className="truncate">{preset.name}</div>
+                    </button>
+                  ))}
+                </div>
 
-              {/* Volume Slider */}
-              <div className="flex items-center gap-2 pt-1">
-                <Volume2 className="w-3.5 h-3.5 text-slate-400 shrink-0" />
-                <input
-                  type="range"
-                  min={0.05}
-                  max={0.95}
-                  step={0.05}
-                  value={lofiVolume}
-                  onChange={(e) => setLofiVolume(Number(e.target.value))}
-                  aria-label="Lo-Fi radio volume"
-                  className="w-full accent-[#4285F4] cursor-pointer"
-                />
+                {/* Volume Slider */}
+                <div className="flex items-center gap-2 pt-1">
+                  <Volume2 className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                  <input
+                    type="range"
+                    min={0.05}
+                    max={0.95}
+                    step={0.05}
+                    value={lofiVolume}
+                    onChange={(e) => setLofiVolume(Number(e.target.value))}
+                    aria-label="Lo-Fi radio volume"
+                    className="w-full accent-[#4285F4] cursor-pointer"
+                  />
+                </div>
               </div>
-            </div>
+            )}
           </motion.div>
         )}
 

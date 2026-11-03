@@ -13,6 +13,7 @@ import { ProgressView } from './components/ProgressView';
 import { VoiceTutorModal } from './components/VoiceTutorModal';
 import { NotebookAndScannerModal } from './components/NotebookAndScannerModal';
 import { DynamicCompanion } from './components/DynamicCompanion';
+import { isFeatureEnabled, isTabAvailable } from './config/launchFeatures';
 import {
   StudyDocument,
   LearnMateNotification,
@@ -48,7 +49,7 @@ function parseTabFromHash(): ActiveTab {
   const raw = window.location.hash.replace(/^#\/?/, '').trim().toLowerCase();
   if (raw === 'learn') return 'study';
   if (raw === 'saved') return 'analytics';
-  if (VALID_TABS.includes(raw as ActiveTab)) {
+  if (VALID_TABS.includes(raw as ActiveTab) && isTabAvailable(raw)) {
     return raw as ActiveTab;
   }
   return 'dashboard';
@@ -86,7 +87,8 @@ export function App() {
 
   const effectiveDoc = activeDoc || documents[0] || studyStorage.getDocuments()[0];
 
-  const handleSelectTab = (tab: ActiveTab) => {
+  const handleSelectTab = (requestedTab: ActiveTab) => {
+    const tab: ActiveTab = isTabAvailable(requestedTab) ? requestedTab : 'dashboard';
     setActiveTab(tab);
     if (typeof window !== 'undefined') {
       const targetHash = `#${tab}`;
@@ -551,7 +553,7 @@ export function App() {
       />
 
       {/* Live Voice AI Tutor Modal */}
-      {activeDoc && (
+      {activeDoc && isFeatureEnabled('liveVoice') && (
         <VoiceTutorModal
           isOpen={voiceTutorOpen}
           onClose={() => setVoiceTutorOpen(false)}

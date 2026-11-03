@@ -16,6 +16,7 @@ import {
   AlertCircle,
 } from 'lucide-react';
 import type { StudyDocument, TutorCitation } from '../types/study';
+import { getApiIdToken } from '../services/aiClient';
 import {
   LearnMateBuddyAvatar,
   type BuddyAvatarState,
@@ -563,20 +564,36 @@ export const VoiceTutorModal: React.FC<VoiceTutorModalProps> = ({
     const ws = new WebSocket(wsUrl);
     wsRef.current = ws;
 
-    ws.onopen = () => {
-      ws.send(
-        JSON.stringify({
-          type: 'setup',
-          title: studyDoc.title,
-          pages: studyDoc.pages,
-          weakTopics,
-        })
-      );
+    ws.onopen = async () => {
+      // The server requires an auth message before anything else on the socket.
+      try {
+        const token = await getApiIdToken();
+        if (ws.readyState !== WebSocket.OPEN) return;
+        ws.send(JSON.stringify({ type: 'auth', token }));
+      } catch (err) {
+        setStatusNote(err instanceof Error ? err.message : 'Please sign in to use the voice tutor.');
+        ws.close();
+      }
     };
 
     ws.onmessage = (event) => {
       try {
         const msg = JSON.parse(event.data);
+        if (msg.type === 'auth_ok') {
+          ws.send(
+            JSON.stringify({
+              type: 'setup',
+              title: studyDoc.title,
+              pages: studyDoc.pages,
+              weakTopics,
+            })
+          );
+          return;
+        }
+        if (msg.type === 'auth_error') {
+          setStatusNote(typeof msg.message === 'string' ? msg.message : 'Voice tutor is unavailable.');
+          return;
+        }
         if (msg.type === 'status') {
           if (msg.state === 'connected') {
             setStatusNote('Connected to Gemini Live Audio (gemini-3.8-live)');

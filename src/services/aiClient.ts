@@ -23,6 +23,7 @@ import type {
   Generate3DModelResponse,
   Custom3DSceneSpec,
 } from '../types/study';
+import { auth } from '../firebase';
 
 export interface AiStatusMetadata {
   aiStatus?: string;
@@ -135,6 +136,69 @@ export interface VideoLessonResponse {
   }>;
 }
 
+/** Error thrown for non-2xx API responses; `code` mirrors the server's machine-readable code. */
+export class ApiRequestError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+    readonly code?: string
+  ) {
+    super(message);
+    this.name = 'ApiRequestError';
+  }
+}
+
+const SIGN_IN_REQUIRED_MESSAGE = 'Please sign in with Google to use LearnMate AI features.';
+
+/** Returns a fresh Firebase ID token for the signed-in user, waiting for auth to initialise. */
+export async function getApiIdToken(forceRefresh = false): Promise<string> {
+  await auth.authStateReady();
+  const user = auth.currentUser;
+  if (!user) {
+    throw new ApiRequestError(SIGN_IN_REQUIRED_MESSAGE, 401, 'auth_required');
+  }
+  return user.getIdToken(forceRefresh);
+}
+
+async function authorizedFetch(url: string, init: RequestInit): Promise<Response> {
+  const send = async (forceRefresh: boolean) =>
+    fetch(url, {
+      ...init,
+      headers: {
+        ...(init.headers || {}),
+        Authorization: `Bearer ${await getApiIdToken(forceRefresh)}`,
+      },
+    });
+
+  const response = await send(false);
+  if (response.status !== 401) return response;
+
+  // An expired token is refreshed once; any other 401 is surfaced to the caller.
+  const peek = await response
+    .clone()
+    .json()
+    .catch(() => ({}));
+  if (peek && peek.code === 'token_expired') {
+    return send(true);
+  }
+  return response;
+}
+
+async function readJsonOrThrow<T>(response: Response): Promise<T> {
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const code = data && typeof data.code === 'string' ? data.code : undefined;
+    const message =
+      response.status === 401
+        ? SIGN_IN_REQUIRED_MESSAGE
+        : (data && typeof data.aiNotice === 'string' && data.aiNotice) ||
+          (data && typeof data.error === 'string' && data.error) ||
+          `Request failed with status ${response.status}`;
+    throw new ApiRequestError(message, response.status, code);
+  }
+  return data as T;
+}
+
 // Client-side in-flight deduplication to prevent duplicate submissions from rapid button clicks
 const inFlightRequests = new Map<string, Promise<unknown>>();
 
@@ -149,21 +213,12 @@ async function postJson<T>(url: string, body: unknown): Promise<T> {
 
   const task = (async () => {
     try {
-      const response = await fetch(url, {
+      const response = await authorizedFetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: serialized,
       });
-
-      const data = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        const message =
-          (data && typeof data.aiNotice === 'string' && data.aiNotice) ||
-          (data && typeof data.error === 'string' && data.error) ||
-          `Request failed with status ${response.status}`;
-        throw new Error(message);
-      }
-      return data as T;
+      return await readJsonOrThrow<T>(response);
     } finally {
       inFlightRequests.delete(requestKey);
     }
@@ -339,11 +394,7 @@ export const aiStudyClient = {
   },
 
   async fetchAiUsageStats(): Promise<AiUsageDashboardStats> {
-    const resp = await fetch('/api/usage');
-    if (!resp.ok) {
-      throw new Error('Failed to load AI usage metrics');
-    }
-    return (await resp.json()) as AiUsageDashboardStats;
+    return readJsonOrThrow<AiUsageDashboardStats>(await authorizedFetch('/api/usage', { method: 'GET' }));
   },
 
   async fetchAiCapabilities(): Promise<{
@@ -358,11 +409,7 @@ export const aiStudyClient = {
       fallbackStrategy: string;
     }>;
   }> {
-    const resp = await fetch('/api/capabilities');
-    if (!resp.ok) {
-      throw new Error('Failed to load AI capabilities');
-    }
-    return resp.json();
+    return readJsonOrThrow(await authorizedFetch('/api/capabilities', { method: 'GET' }));
   },
 };
 
