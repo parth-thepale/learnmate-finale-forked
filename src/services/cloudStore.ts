@@ -46,6 +46,8 @@ export const cloudPaths = {
   attempts: (uid: string) => `users/${uid}/attempts`,
   attempt: (uid: string, id: string) => `users/${uid}/attempts/${id}`,
   studyState: (uid: string, id: string) => `users/${uid}/studyState/${id}`,
+  studySessions: (uid: string) => `users/${uid}/studySessions`,
+  studySession: (uid: string, id: string) => `users/${uid}/studySessions/${id}`,
   chunks: (parentPath: string) => `${parentPath}/chunks`,
   chunk: (parentPath: string, index: number) => `${parentPath}/chunks/${index}`,
 };

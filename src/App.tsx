@@ -185,7 +185,8 @@ export function App() {
       deviceOnly.plannerTasks +
       deviceOnly.annotatedDocuments +
       deviceOnly.focusSessions +
-      deviceOnly.creativeAssets;
+      deviceOnly.creativeAssets +
+      deviceOnly.studySessions;
 
     if (unsynced > 0 || deviceOnlyItems > 0) {
       const warnings: string[] = [];
@@ -196,7 +197,9 @@ export function App() {
       }
       if (deviceOnlyItems > 0) {
         warnings.push(
-          'Notebook entries, planner tasks, PDF annotations and focus history are stored only on this device.'
+          `Notebook entries, planner tasks, PDF annotations${
+            deviceOnly.studySessions > 0 ? ', study sessions' : ''
+          } and focus history are stored only on this device.`
         );
       }
       const confirmed = window.confirm(

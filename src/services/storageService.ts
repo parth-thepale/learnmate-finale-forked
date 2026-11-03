@@ -22,6 +22,21 @@ import type {
   StudentAcademicProfile,
 } from '../types/study';
 import { computeContentVersion } from '../utils/quizGrading';
+import { isFeatureEnabled } from '../config/launchFeatures';
+import type { JeeSubjectId } from '../data/jeeMainSyllabus';
+import type { StudySession } from '../types/questionBank';
+import { createSession, nextUpdatedAt, validateSession } from '../utils/sessionModel';
+import {
+  decodeStudySessionDoc,
+  encodeStudySessionDoc,
+  encodeStudySessionTombstone,
+  newStudySessionId,
+  resolveStudySession,
+  type CloudStudySession,
+  type StudySessionResolution,
+  type StudySessionSyncState,
+  type StudySessionTombstone,
+} from './studySessionSync';
 import {
   STORAGE_KEYS,
   clearScope,
@@ -131,6 +146,19 @@ export interface IStudyStorageRepository {
 
   clearAllProgress(): void;
 
+  // Study sessions (learning contexts; not focus-timer records). Stored per account on the
+  // device; synced to the account only when the studySessionCloudSync feature is enabled.
+  getStudySessions(): StudySession[];
+  getStudySession(id: string): StudySession | null;
+  createStudySession(input: StudySessionInput): StudySession;
+  updateStudySession(id: string, patch: StudySessionPatch): StudySession | null;
+  deleteStudySession(id: string): boolean;
+  /** Idempotent insert of pre-built sessions (e.g. migration); existing and deleted ids are skipped. */
+  insertStudySessions(sessions: StudySession[]): { inserted: string[]; skipped: Array<{ id: string; reason: string }> };
+  getDeletedStudySessionIds(): string[];
+  getStudySessionSyncState(id: string): StudySessionSyncState;
+  isStudySessionCloudSyncEnabled(): boolean;
+
   /** Connects the cloud document store (Firestore in the app; in-memory in tests). */
   attachCloudStore(store: CloudDocStore): void;
   /** Switches local storage to the given account's private scope (or the guest scope). */
@@ -155,7 +183,29 @@ export interface DeviceOnlyDataSummary {
   annotatedDocuments: number;
   focusSessions: number;
   creativeAssets: number;
+  /** Study sessions kept only on this device (cloud sync for sessions is not enabled yet). */
+  studySessions: number;
 }
+
+export interface StudySessionInput {
+  name: string;
+  subjectId?: JeeSubjectId;
+  chapterId?: string;
+  topicIds?: string[];
+  resourceIds?: string[];
+}
+
+export type StudySessionPatch = Partial<Pick<StudySession, 'name' | 'subjectId' | 'chapterId' | 'topicIds' | 'resourceIds' | 'lastActiveAt'>>;
+
+export class StudySessionError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'StudySessionError';
+  }
+}
+
+/** Upper bound on remembered deletions per account (ids are short; this is far above real use). */
+const MAX_STUDY_SESSION_TOMBSTONES = 5_000;
 
 const KEYS = STORAGE_KEYS;
 
@@ -294,9 +344,13 @@ export class HybridCloudStudyRepository implements IStudyStorageRepository {
   private revisionCounter = 0;
   private lastMigration: LegacyMigrationResult | null = null;
   private readonly sync: SyncStatusTracker;
+  private readonly studySessionCloudSync: boolean;
+  /** Session ids whose current version is confirmed in the cloud (this account, this run). */
+  private readonly studySessionsConfirmed = new Set<string>();
 
-  constructor(options: { storage?: KeyValueStorage | null } = {}) {
+  constructor(options: { storage?: KeyValueStorage | null; studySessionCloudSync?: boolean } = {}) {
     this.storage = options.storage !== undefined ? options.storage : browserStorage();
+    this.studySessionCloudSync = options.studySessionCloudSync ?? isFeatureEnabled('studySessionCloudSync');
     this.sync = new SyncStatusTracker(() => this.getUnsyncedChangeCount());
     this.sync.subscribe(() => this.notifyListeners());
   }
@@ -427,6 +481,8 @@ export class HybridCloudStudyRepository implements IStudyStorageRepository {
     dirty[kind][id] = revision;
     if (kind === 'documents') delete dirty.deletedDocuments[id];
     if (kind === 'deletedDocuments') delete dirty.documents[id];
+    if (kind === 'studySessions') delete dirty.deletedStudySessions[id];
+    if (kind === 'deletedStudySessions') delete dirty.studySessions[id];
     this.writeDirty(dirty);
     return revision;
   }
@@ -437,6 +493,19 @@ export class HybridCloudStudyRepository implements IStudyStorageRepository {
       delete dirty[kind][id];
       this.writeDirty(dirty);
     }
+  }
+
+  /** Clears a dirty mark regardless of revision (the cloud already holds the winning version). */
+  private settleDirty(kinds: DirtyKind[], id: string): void {
+    const dirty = this.readDirty();
+    let changed = false;
+    for (const kind of kinds) {
+      if (dirty[kind][id] !== undefined) {
+        delete dirty[kind][id];
+        changed = true;
+      }
+    }
+    if (changed) this.writeDirty(dirty);
   }
 
   getUnsyncedChangeCount(): number {
@@ -455,6 +524,7 @@ export class HybridCloudStudyRepository implements IStudyStorageRepository {
       annotatedDocuments,
       focusSessions: this.read<FocusSessionRecord[]>(KEYS.FOCUS_SESSIONS, []).length,
       creativeAssets: this.read<CreativeAsset[]>(KEYS.CREATIVE_ASSETS, []).length,
+      studySessions: this.studySessionCloudSync ? 0 : this.getStudySessions().length,
     };
   }
 
@@ -490,6 +560,7 @@ export class HybridCloudStudyRepository implements IStudyStorageRepository {
     this.generation++;
     this.chunkCounts.clear();
     this.writeQueues.clear();
+    this.studySessionsConfirmed.clear();
     this.currentUser = user;
     this.scope = nextScope;
     this.sync.setSignedIn(Boolean(user));
@@ -503,6 +574,7 @@ export class HybridCloudStudyRepository implements IStudyStorageRepository {
     this.generation++;
     this.writeQueues.clear();
     this.chunkCounts.clear();
+    this.studySessionsConfirmed.clear();
     this.currentUser = null;
     this.scope = null;
     clearScope(this.storage, scope);
@@ -655,6 +727,8 @@ export class HybridCloudStudyRepository implements IStudyStorageRepository {
     }
     for (const id of Object.keys(dirty.studyState)) tasks.push(this.persistStudyStateToCloud(id));
     if (dirty.profile[PROFILE_DIRTY_ID]) tasks.push(this.persistProfileToCloud());
+    for (const id of Object.keys(dirty.studySessions)) tasks.push(this.queueStudySessionSync('studySessions', id));
+    for (const id of Object.keys(dirty.deletedStudySessions)) tasks.push(this.queueStudySessionSync('deletedStudySessions', id));
     await Promise.allSettled(tasks);
   }
 
@@ -791,6 +865,10 @@ export class HybridCloudStudyRepository implements IStudyStorageRepository {
       this.write(KEYS.DOCUMENTS, mergedDocs);
       for (const d of toPush) void this.persistDocumentToCloud(d);
 
+      // 4b. Study sessions (only when session cloud sync is enabled).
+      unreadable += await this.syncStudySessions(uid, stillCurrent);
+      if (!stillCurrent()) return;
+
       // 5. Per-document study state.
       for (const studyDoc of mergedDocs) {
         const statePath = cloudPaths.studyState(uid, studyDoc.id);
@@ -924,6 +1002,304 @@ export class HybridCloudStudyRepository implements IStudyStorageRepository {
     );
 
     this.cloudUnsubscribers.push(docsUnsub, attemptsUnsub);
+
+    if (this.studySessionCloudSync) {
+      const sessionsUnsub = cloud.subscribeCollection(
+        cloudPaths.studySessions(uid),
+        (entries) => {
+          if (!stillCurrent()) return;
+          const dirty = this.readDirty();
+          let changed = false;
+          for (const entry of entries) {
+            // Pending local writes resolve against the cloud themselves when they run.
+            if (dirty.studySessions[entry.id] !== undefined || dirty.deletedStudySessions[entry.id] !== undefined) continue;
+            const remote = decodeStudySessionDoc(entry.id, entry.data);
+            if (!remote) continue;
+            const action = resolveStudySession(this.getStudySession(entry.id) ?? undefined, this.readStudySessionTombstones()[entry.id], remote);
+            if (action === 'adopt_remote' || action === 'adopt_tombstone' || action === 'in_sync') {
+              try {
+                if (this.applyStudySessionResolution(entry.id, action, remote)) changed = true;
+              } catch (err) {
+                this.sync.recordError(err instanceof Error ? err.message : 'A study session update could not be saved on this device.');
+              }
+            }
+          }
+          if (changed && stillCurrent()) this.notifyListeners();
+        },
+        () => {
+          // Permission errors during sign-out transitions are expected.
+        }
+      );
+      this.cloudUnsubscribers.push(sessionsUnsub);
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Study sessions
+  // -------------------------------------------------------------------------
+
+  isStudySessionCloudSyncEnabled(): boolean {
+    return this.studySessionCloudSync;
+  }
+
+  private readStudySessions(): StudySession[] {
+    const list = this.read<StudySession[]>(KEYS.STUDY_SESSIONS, []);
+    return Array.isArray(list) ? list.filter((s) => s && validateSession(s).length === 0) : [];
+  }
+
+  private readStudySessionTombstones(): Record<string, StudySessionTombstone> {
+    const map = this.read<Record<string, StudySessionTombstone>>(KEYS.STUDY_SESSION_TOMBSTONES, {});
+    return map && typeof map === 'object' && !Array.isArray(map) ? map : {};
+  }
+
+  private writeStudySessionState(sessions: StudySession[], tombstones?: Record<string, StudySessionTombstone>): void {
+    if (tombstones) {
+      const entries = Object.entries(tombstones);
+      const bounded =
+        entries.length > MAX_STUDY_SESSION_TOMBSTONES
+          ? Object.fromEntries(entries.sort(([, a], [, b]) => (a.deletedAt < b.deletedAt ? 1 : -1)).slice(0, MAX_STUDY_SESSION_TOMBSTONES))
+          : tombstones;
+      if (!this.write(KEYS.STUDY_SESSION_TOMBSTONES, bounded)) {
+        throw new StudySessionError('This device ran out of storage space; the study session was not saved.');
+      }
+    }
+    if (!this.write(KEYS.STUDY_SESSIONS, sessions)) {
+      throw new StudySessionError('This device ran out of storage space; the study session was not saved.');
+    }
+  }
+
+  getStudySessions(): StudySession[] {
+    return this.readStudySessions().sort((a, b) => (a.lastActiveAt < b.lastActiveAt ? 1 : a.lastActiveAt > b.lastActiveAt ? -1 : 0));
+  }
+
+  getStudySession(id: string): StudySession | null {
+    return this.readStudySessions().find((s) => s.id === id) ?? null;
+  }
+
+  getDeletedStudySessionIds(): string[] {
+    return Object.keys(this.readStudySessionTombstones());
+  }
+
+  createStudySession(input: StudySessionInput): StudySession {
+    if (!this.scope) throw new StudySessionError('Study sessions are unavailable until the account is ready.');
+    const tombstones = this.readStudySessionTombstones();
+    let id = newStudySessionId();
+    while (tombstones[id] || this.getStudySession(id)) id = newStudySessionId();
+    let session: StudySession;
+    try {
+      session = createSession({ id, ...input });
+    } catch (err) {
+      throw new StudySessionError(err instanceof Error ? err.message : 'Invalid study session.');
+    }
+    this.writeStudySessionState([session, ...this.readStudySessions()]);
+    void this.queueStudySessionSync('studySessions', session.id);
+    this.notifyListeners();
+    return session;
+  }
+
+  updateStudySession(id: string, patch: StudySessionPatch): StudySession | null {
+    const sessions = this.readStudySessions();
+    const index = sessions.findIndex((s) => s.id === id);
+    if (index < 0) return null;
+    const previous = sessions[index];
+    const merged: StudySession = { ...previous };
+    if (patch.name !== undefined) merged.name = patch.name.trim();
+    if ('subjectId' in patch) merged.subjectId = patch.subjectId;
+    if ('chapterId' in patch) merged.chapterId = patch.chapterId;
+    if (patch.topicIds !== undefined) merged.topicIds = [...new Set(patch.topicIds)];
+    if (patch.resourceIds !== undefined) merged.resourceIds = [...new Set(patch.resourceIds)];
+    if (patch.lastActiveAt !== undefined) merged.lastActiveAt = patch.lastActiveAt;
+    merged.updatedAt = nextUpdatedAt(previous.updatedAt);
+    if (!merged.subjectId) delete merged.subjectId;
+    if (!merged.chapterId) delete merged.chapterId;
+    const errors = validateSession(merged);
+    if (errors.length > 0) throw new StudySessionError(`Invalid study session: ${errors.join('; ')}`);
+    sessions[index] = merged;
+    this.writeStudySessionState(sessions);
+    void this.queueStudySessionSync('studySessions', id);
+    this.notifyListeners();
+    return merged;
+  }
+
+  deleteStudySession(id: string): boolean {
+    const sessions = this.readStudySessions();
+    const existing = sessions.find((s) => s.id === id);
+    if (!existing) return false;
+    const deletedAt = nextUpdatedAt(existing.updatedAt);
+    const tombstones = { ...this.readStudySessionTombstones(), [id]: { id, deletedAt, updatedAt: deletedAt } };
+    this.writeStudySessionState(
+      sessions.filter((s) => s.id !== id),
+      tombstones
+    );
+    this.studySessionsConfirmed.delete(id);
+    void this.queueStudySessionSync('deletedStudySessions', id);
+    this.notifyListeners();
+    return true;
+  }
+
+  insertStudySessions(candidates: StudySession[]): { inserted: string[]; skipped: Array<{ id: string; reason: string }> } {
+    const sessions = this.readStudySessions();
+    const existing = new Set(sessions.map((s) => s.id));
+    const tombstones = this.readStudySessionTombstones();
+    const inserted: StudySession[] = [];
+    const skipped: Array<{ id: string; reason: string }> = [];
+    for (const candidate of candidates) {
+      const id = String(candidate?.id ?? '');
+      if (existing.has(id)) skipped.push({ id, reason: 'already exists' });
+      else if (tombstones[id]) skipped.push({ id, reason: 'deleted by the student' });
+      else if (validateSession(candidate).length > 0) skipped.push({ id, reason: `invalid: ${validateSession(candidate).join('; ')}` });
+      else {
+        existing.add(id);
+        inserted.push(candidate);
+      }
+    }
+    if (inserted.length > 0) {
+      this.writeStudySessionState([...inserted, ...sessions]);
+      for (const s of inserted) void this.queueStudySessionSync('studySessions', s.id);
+      this.notifyListeners();
+    }
+    return { inserted: inserted.map((s) => s.id), skipped };
+  }
+
+  getStudySessionSyncState(id: string): StudySessionSyncState {
+    if (!this.currentUser || !this.cloud || !this.studySessionCloudSync) return 'device_only';
+    const dirty = this.readDirty();
+    if (dirty.studySessions[id] !== undefined || dirty.deletedStudySessions[id] !== undefined) return 'pending';
+    return this.studySessionsConfirmed.has(id) ? 'synced' : 'pending';
+  }
+
+  private studySessionCloudActive(): boolean {
+    return this.studySessionCloudSync && Boolean(this.currentUser && this.cloud);
+  }
+
+  /**
+   * Applies a cloud decision locally. Returns true when local state changed. Never pushes: the
+   * caller decides whether a write is needed.
+   */
+  private applyStudySessionResolution(id: string, action: StudySessionResolution, remote: CloudStudySession | null): boolean {
+    if (action === 'adopt_tombstone' && remote?.kind === 'tombstone') {
+      const sessions = this.readStudySessions();
+      const tombstones = this.readStudySessionTombstones();
+      tombstones[id] = remote.tombstone;
+      this.writeStudySessionState(
+        sessions.filter((s) => s.id !== id),
+        tombstones
+      );
+      this.settleDirty(['studySessions', 'deletedStudySessions'], id);
+      this.studySessionsConfirmed.delete(id);
+      return true;
+    }
+    if (action === 'adopt_remote' && remote?.kind === 'live') {
+      const sessions = this.readStudySessions().filter((s) => s.id !== id);
+      this.writeStudySessionState([remote.session, ...sessions]);
+      this.settleDirty(['studySessions'], id);
+      this.studySessionsConfirmed.add(id);
+      return true;
+    }
+    if (action === 'in_sync') {
+      this.settleDirty(['studySessions', 'deletedStudySessions'], id);
+      if (remote?.kind === 'live') this.studySessionsConfirmed.add(id);
+    }
+    return false;
+  }
+
+  /**
+   * Queues a cloud write for one session (or its tombstone). The cloud copy is read first and the
+   * deterministic resolution decides: adopt the cloud version, write ours, or do nothing. If the
+   * write is rejected (e.g. the rules refuse an older updatedAt), the cloud copy is re-read so a
+   * newer or deleted version is adopted instead of being reported as a failure.
+   */
+  private queueStudySessionSync(kind: 'studySessions' | 'deletedStudySessions', id: string): Promise<void> {
+    if (!this.studySessionCloudActive() || !isSafeCloudId(id)) return Promise.resolve();
+    const cloud = this.cloud!;
+    const uid = this.currentUser!.uid;
+    const generation = this.generation;
+    const path = cloudPaths.studySession(uid, id);
+    const revision = this.markDirty(kind, id);
+
+    const resolveAgainstCloud = async () => {
+      const remote = decodeStudySessionDoc(id, await cloud.getDoc(path));
+      const local = this.getStudySession(id) ?? undefined;
+      const tombstone = this.readStudySessionTombstones()[id];
+      return { remote, local, tombstone, action: resolveStudySession(local, tombstone, remote) };
+    };
+
+    const run = async () => {
+      if (generation !== this.generation) return;
+      const first = await resolveAgainstCloud();
+      if (generation !== this.generation) return;
+      if (first.action !== 'push_local' && first.action !== 'push_tombstone') {
+        if (this.applyStudySessionResolution(id, first.action, first.remote)) this.notifyListeners();
+        this.settleDirty([kind], id);
+        return;
+      }
+      const data =
+        first.action === 'push_tombstone'
+          ? encodeStudySessionTombstone(uid, first.tombstone!)
+          : encodeStudySessionDoc(uid, first.local!);
+      try {
+        await cloud.commit([{ type: 'set', path, data }]);
+      } catch (err) {
+        if (generation !== this.generation) return;
+        const retry = await resolveAgainstCloud().catch(() => null);
+        if (retry && retry.action !== 'push_local' && retry.action !== 'push_tombstone') {
+          if (this.applyStudySessionResolution(id, retry.action, retry.remote)) this.notifyListeners();
+          this.settleDirty([kind], id);
+          return;
+        }
+        throw err;
+      }
+      if (generation !== this.generation) return;
+      if (first.action === 'push_local') this.studySessionsConfirmed.add(id);
+      this.clearDirty(kind, id, revision);
+      this.notifyListeners();
+    };
+
+    const previousTask = this.writeQueues.get(path) || Promise.resolve();
+    const task = previousTask
+      .catch(() => undefined)
+      .then(() => this.sync.track(run))
+      .catch((err: unknown) => {
+        const message = `Study session sync failed (${err instanceof Error ? err.message.slice(0, 120) : 'unknown error'}). It is saved on this device and will be retried.`;
+        console.warn(`[sync] ${path}: ${message}`);
+        this.sync.recordError(message);
+      });
+    this.writeQueues.set(path, task);
+    return task;
+  }
+
+  /** Full reconciliation of this account's sessions with the cloud (sign-in / manual sync). */
+  private async syncStudySessions(uid: string, stillCurrent: () => boolean): Promise<number> {
+    if (!this.studySessionCloudActive()) return 0;
+    const cloud = this.cloud!;
+    const entries = await cloud.listCollection(cloudPaths.studySessions(uid));
+    if (!stillCurrent()) return 0;
+    let unreadable = 0;
+    let changed = false;
+    const seen = new Set<string>();
+    const toPush: Array<['studySessions' | 'deletedStudySessions', string]> = [];
+    const dirty = this.readDirty();
+    for (const entry of entries) {
+      seen.add(entry.id);
+      const remote = decodeStudySessionDoc(entry.id, entry.data);
+      if (!remote) {
+        unreadable++;
+        continue;
+      }
+      const action = resolveStudySession(this.getStudySession(entry.id) ?? undefined, this.readStudySessionTombstones()[entry.id], remote);
+      if (action === 'push_local') toPush.push(['studySessions', entry.id]);
+      else if (action === 'push_tombstone') toPush.push(['deletedStudySessions', entry.id]);
+      else if (this.applyStudySessionResolution(entry.id, action, remote)) changed = true;
+    }
+    for (const session of this.readStudySessions()) {
+      if (!seen.has(session.id)) toPush.push(['studySessions', session.id]);
+    }
+    for (const id of Object.keys(dirty.deletedStudySessions)) {
+      if (!seen.has(id)) toPush.push(['deletedStudySessions', id]);
+    }
+    if (changed) this.notifyListeners();
+    for (const [kind, id] of toPush) void this.queueStudySessionSync(kind, id);
+    return unreadable;
   }
 
   // -------------------------------------------------------------------------

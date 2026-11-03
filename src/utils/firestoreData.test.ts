@@ -60,8 +60,8 @@ test('study sessions with unset optional fields become valid Firestore documents
   assert.equal(session.subjectId, undefined);
   assert.equal(session.chapterId, undefined);
   assert.throws(() => assertFirestoreValue(session as unknown as Record<string, unknown>), /undefined/);
-  const data = toFirestoreData(session as unknown as Record<string, unknown>, { required: ['id', 'name', 'topicIds', 'resourceIds', 'createdAt', 'lastActiveAt', 'schemaVersion'] });
-  assert.deepEqual(Object.keys(data).sort(), ['createdAt', 'id', 'lastActiveAt', 'name', 'resourceIds', 'schemaVersion', 'topicIds']);
+  const data = toFirestoreData(session as unknown as Record<string, unknown>, { required: ['id', 'name', 'topicIds', 'resourceIds', 'createdAt', 'lastActiveAt', 'updatedAt', 'schemaVersion'] });
+  assert.deepEqual(Object.keys(data).sort(), ['createdAt', 'id', 'lastActiveAt', 'name', 'resourceIds', 'schemaVersion', 'topicIds', 'updatedAt']);
   assert.doesNotThrow(() => assertFirestoreValue(data));
 
   const withChapter = createSession({ id: 'sess-2', name: 'Units', chapterId: 'physics.units-measurements', topicIds: ['physics.units-measurements.units-si'] });

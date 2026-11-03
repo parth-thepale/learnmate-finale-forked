@@ -231,6 +231,11 @@ export interface AttemptV2Fields {
  * Study session: the central context for resources, tutor chat and practice.
  * Existing documents are referenced (never copied or moved) by resource ids.
  */
+/**
+ * A study session: the learning context a student returns to (a chapter, a set of documents...).
+ * Not to be confused with focus-timer records (FocusSessionRecord in types/study.ts).
+ * All timestamps are ISO-8601 UTC strings as produced by Date#toISOString().
+ */
 export interface StudySession {
   id: string;
   name: string;
@@ -241,6 +246,8 @@ export interface StudySession {
   resourceIds: string[];
   createdAt: string;
   lastActiveAt: string;
+  /** Strictly increasing per change; decides which copy wins when two devices edit the session. */
+  updatedAt: string;
   /** Set when the session was created automatically for a pre-existing document. */
   migratedFromDocumentId?: string;
   schemaVersion: 1;

@@ -4,7 +4,7 @@
  * Disabled features keep their source code, but their API routes respond 404 and
  * their navigation entry points are hidden. Flip a flag (and redeploy) to re-enable.
  */
-export type LaunchFeature = 'create' | 'explore' | 'lofi' | 'liveVoice' | 'companionChat';
+export type LaunchFeature = 'create' | 'explore' | 'lofi' | 'liveVoice' | 'companionChat' | 'studySessionCloudSync';
 
 export const LAUNCH_FEATURES: Readonly<Record<LaunchFeature, boolean>> = Object.freeze({
   create: false,
@@ -13,6 +13,9 @@ export const LAUNCH_FEATURES: Readonly<Record<LaunchFeature, boolean>> = Object.
   liveVoice: false,
   // Mini AI chat in the floating companion duplicates the session tutor (and its AI cost).
   companionChat: false,
+  // Study sessions sync to users/{uid}/studySessions only after the rules for that collection are
+  // emulator-tested and deployed. Until then sessions are kept on the device and labelled as such.
+  studySessionCloudSync: false,
 });
 
 export function isFeatureEnabled(feature: LaunchFeature): boolean {

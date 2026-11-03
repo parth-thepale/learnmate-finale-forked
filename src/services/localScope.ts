@@ -31,6 +31,9 @@ export const STORAGE_KEYS = Object.freeze({
   SEEDED: 'learnmate_seeded_materials_v1',
   SYNC_DIRTY: 'learnmate_sync_dirty_v1',
   SAVED_EXPLORE: 'learnmate_saved_explore_v2',
+  // Study sessions (learning contexts). Distinct from FOCUS_SESSIONS (focus-timer history).
+  STUDY_SESSIONS: 'learnmate_study_sessions_v1',
+  STUDY_SESSION_TOMBSTONES: 'learnmate_study_session_tombstones_v1',
 });
 
 /** Device-level preferences that are safe to share between accounts on one device. */
@@ -53,6 +56,8 @@ const PRIVATE_EXACT_KEYS: ReadonlySet<string> = new Set([
   STORAGE_KEYS.STUDENT_PROFILE,
   STORAGE_KEYS.SEEDED,
   STORAGE_KEYS.SYNC_DIRTY,
+  STORAGE_KEYS.STUDY_SESSIONS,
+  STORAGE_KEYS.STUDY_SESSION_TOMBSTONES,
 ]);
 
 const PRIVATE_PREFIXES: readonly string[] = [
@@ -148,20 +153,16 @@ export interface DirtySet {
   studyState: Record<string, number>;
   deletedDocuments: Record<string, number>;
   profile: Record<string, number>;
+  studySessions: Record<string, number>;
+  deletedStudySessions: Record<string, number>;
 }
 
 export function emptyDirtySet(): DirtySet {
-  return { documents: {}, attempts: {}, studyState: {}, deletedDocuments: {}, profile: {} };
+  return { documents: {}, attempts: {}, studyState: {}, deletedDocuments: {}, profile: {}, studySessions: {}, deletedStudySessions: {} };
 }
 
 export function countDirty(dirty: DirtySet): number {
-  return (
-    Object.keys(dirty.documents).length +
-    Object.keys(dirty.attempts).length +
-    Object.keys(dirty.studyState).length +
-    Object.keys(dirty.deletedDocuments).length +
-    Object.keys(dirty.profile).length
-  );
+  return Object.values(dirty).reduce((sum, entries) => sum + Object.keys(entries).length, 0);
 }
 
 export function readDirtySet(storage: KeyValueStorage, scope: LocalScope): DirtySet {
@@ -175,6 +176,8 @@ export function readDirtySet(storage: KeyValueStorage, scope: LocalScope): Dirty
       studyState: parsed.studyState || {},
       deletedDocuments: parsed.deletedDocuments || {},
       profile: parsed.profile || {},
+      studySessions: parsed.studySessions || {},
+      deletedStudySessions: parsed.deletedStudySessions || {},
     };
   } catch {
     return emptyDirtySet();

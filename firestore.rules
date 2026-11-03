@@ -84,6 +84,44 @@ service cloud.firestore {
              isValidStorageMetadata(data);
     }
 
+    // ---------------------------------------------------------------
+    // Study sessions (learning contexts; not focus-timer records).
+    // Limits match src/utils/sessionModel.ts STUDY_SESSION_LIMITS.
+    // ---------------------------------------------------------------
+    function isIsoUtc(value) {
+      return value is string && value.size() == 24 &&
+             value.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}[.][0-9]{3}Z$');
+    }
+
+    function isSessionRef(data, field) {
+      return !(field in data) || (data[field] is string && data[field].size() > 0 && data[field].size() <= 160);
+    }
+
+    function isLiveStudySession(data, userId, sessionId) {
+      return data.keys().hasOnly(['id', 'uid', 'schemaVersion', 'deleted', 'name', 'subjectId', 'chapterId', 'topicIds',
+                                  'resourceIds', 'createdAt', 'lastActiveAt', 'updatedAt', 'migratedFromDocumentId']) &&
+             data.keys().hasAll(['id', 'uid', 'schemaVersion', 'deleted', 'name', 'topicIds', 'resourceIds',
+                                 'createdAt', 'lastActiveAt', 'updatedAt']) &&
+             data.id == sessionId && data.uid == userId &&
+             data.schemaVersion == 1 && data.deleted == false &&
+             data.name is string && data.name.size() > 0 && data.name.size() <= 120 &&
+             (!('subjectId' in data) || data.subjectId in ['physics', 'chemistry', 'mathematics']) &&
+             isSessionRef(data, 'chapterId') &&
+             isSessionRef(data, 'migratedFromDocumentId') &&
+             data.topicIds is list && data.topicIds.size() <= 50 &&
+             data.resourceIds is list && data.resourceIds.size() <= 100 &&
+             isIsoUtc(data.createdAt) && isIsoUtc(data.lastActiveAt) && isIsoUtc(data.updatedAt);
+    }
+
+    // Deleted sessions are kept as tombstones so that no older copy can resurrect them.
+    function isStudySessionTombstone(data, userId, sessionId) {
+      return data.keys().hasOnly(['id', 'uid', 'schemaVersion', 'deleted', 'deletedAt', 'updatedAt']) &&
+             data.keys().hasAll(['id', 'uid', 'schemaVersion', 'deleted', 'deletedAt', 'updatedAt']) &&
+             data.id == sessionId && data.uid == userId &&
+             data.schemaVersion == 1 && data.deleted == true &&
+             isIsoUtc(data.deletedAt) && isIsoUtc(data.updatedAt);
+    }
+
     // One ordered piece of a chunked payload. Readers verify count and checksum on the parent.
     function isValidChunk(data, userId, chunkId) {
       return data.keys().hasOnly(['index', 'uid', 'data']) &&
@@ -136,6 +174,20 @@ service cloud.firestore {
           allow create, update: if isOwner(userId) && isValidChunk(request.resource.data, userId, chunkId);
         }
       }
+    }
+
+    // Study sessions: owner-only, validated, never moved back in time, deletion is final.
+    match /users/{userId}/studySessions/{sessionId} {
+      allow read: if isOwner(userId);
+      allow create: if isOwner(userId) && sessionId.size() <= 160 &&
+                       (isLiveStudySession(request.resource.data, userId, sessionId) ||
+                        isStudySessionTombstone(request.resource.data, userId, sessionId));
+      allow update: if isOwner(userId) && resource.data.deleted == false &&
+                       (isStudySessionTombstone(request.resource.data, userId, sessionId) ||
+                        (isLiveStudySession(request.resource.data, userId, sessionId) &&
+                         request.resource.data.createdAt == resource.data.createdAt &&
+                         request.resource.data.updatedAt >= resource.data.updatedAt));
+      allow delete: if false;
     }
 
     // Server-only AI usage quota counters (written with the Admin SDK, which bypasses rules).

@@ -12,7 +12,8 @@
     "lint": "tsc --noEmit",
     "test": "tsx --test \"src/**/*.test.ts\"",
     "bank:validate": "tsx scripts/validate-question-bank.ts",
-    "questions:import": "tsx scripts/question-import.ts"
+    "questions:import": "tsx scripts/question-import.ts",
+    "test:rules": "npx --yes firebase-tools@15.34.2 emulators:exec --only firestore --project demo-learnmate-rules \"tsx --test firestore-tests/firestore.rules.test.ts\""
   },
   "dependencies": {
     "@google/genai": "^2.4.0",
@@ -35,6 +36,7 @@
     "ws": "^8.22.0"
   },
   "devDependencies": {
+    "@firebase/rules-unit-testing": "6.0.0",
     "@types/express": "^4.17.21",
     "@types/node": "^22.14.0",
     "@types/react": "^19.3.0",
