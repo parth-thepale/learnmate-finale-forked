@@ -4,6 +4,7 @@
  * (uses a demo- project id, so nothing can reach a real Firebase project).
  */
 import test, { after, before, beforeEach } from 'node:test';
+import assert from 'node:assert/strict';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -211,4 +212,285 @@ test('existing ownership protections are unchanged', async () => {
   await denied(getDoc(doc(as('alice'), 'aiUsageDaily/alice_2026-11-03')));
   await denied(setDoc(doc(as('alice'), 'aiUsageDaily/alice_2026-11-03'), { units: 0 }));
   await denied(setDoc(doc(as('alice'), 'somethingElse/x'), { a: 1 }), 'unknown collections stay denied');
+});
+
+// ---------------------------------------------------------------------------
+// Stage D: Firestore Trusted Attempt Security Rules
+// ---------------------------------------------------------------------------
+
+function v1AttemptDoc(uid: string, id: string, overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    id,
+    uid,
+    documentId: 'doc-1',
+    documentTitle: 'Mechanics notes',
+    mode: 'diagnostic',
+    score: 3,
+    totalQuestions: 5,
+    percentage: 60,
+    completedAt: '2026-11-02T10:00:00.000Z',
+    attemptJson: JSON.stringify({ id, score: 3 }),
+    storageVersion: 2,
+    payloadEncoding: 'inline',
+    chunkCount: 0,
+    ...overrides,
+  };
+}
+
+function trustedAttemptDoc(uid: string, id: string, overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    id,
+    uid,
+    documentId: 'doc-syllabus-jee',
+    documentTitle: 'JEE Practice: Mechanics',
+    mode: 'diagnostic',
+    score: 4,
+    totalQuestions: 5,
+    percentage: 80,
+    completedAt: '2026-11-03T12:00:00.000Z',
+    attemptJson: JSON.stringify({ id, score: 4 }),
+    storageVersion: 2,
+    payloadEncoding: 'inline',
+    chunkCount: 0,
+    scoredBy: 'server',
+    schemaVersion: 2,
+    contextType: 'syllabus',
+    examType: 'jee_main',
+    syllabusId: 'physics.mechanics',
+    ...overrides,
+  };
+}
+
+function validChunkDoc(uid: string, index: number, data = 'chunk-payload'): Record<string, unknown> {
+  return {
+    index,
+    uid,
+    data,
+  };
+}
+
+test('Stage D - client creation with trusted markers (scoredBy, schemaVersion, contextType) is denied', async () => {
+  const db = as('alice');
+  const base = v1AttemptDoc('alice', 'att-client-1');
+
+  // Negative control: base valid v1 attempt is accepted
+  await allowed(setDoc(doc(db, cloudPaths.attempt('alice', 'att-client-1')), base), 'valid v1 payload must succeed');
+
+  // Trusted marker 1: scoredBy: "server"
+  await denied(
+    setDoc(doc(db, cloudPaths.attempt('alice', 'att-client-2')), { ...v1AttemptDoc('alice', 'att-client-2'), scoredBy: 'server' }),
+    'creation with scoredBy must be denied'
+  );
+
+  // Trusted marker 2: schemaVersion
+  await denied(
+    setDoc(doc(db, cloudPaths.attempt('alice', 'att-client-3')), { ...v1AttemptDoc('alice', 'att-client-3'), schemaVersion: 2 }),
+    'creation with schemaVersion must be denied'
+  );
+
+  // Trusted marker 3: contextType
+  await denied(
+    setDoc(doc(db, cloudPaths.attempt('alice', 'att-client-4')), { ...v1AttemptDoc('alice', 'att-client-4'), contextType: 'syllabus' }),
+    'creation with contextType must be denied'
+  );
+});
+
+test('Stage D - client creation using reserved attempt IDs (att-qs_*) is denied', async () => {
+  const db = as('alice');
+  const reservedId = 'att-qs_practice-123';
+  const reservedAttempt = v1AttemptDoc('alice', reservedId);
+
+  // Creation of attempt with reserved prefix is denied even with otherwise valid v1 payload
+  await denied(setDoc(doc(db, cloudPaths.attempt('alice', reservedId)), reservedAttempt), 'reserved att-qs_ id must be denied');
+
+  // Control: normal unreserved ID succeeds
+  await allowed(
+    setDoc(doc(db, cloudPaths.attempt('alice', 'att-normal_practice-123')), v1AttemptDoc('alice', 'att-normal_practice-123')),
+    'unreserved ID must succeed'
+  );
+});
+
+test('Stage D - client cannot update server-written trusted attempts or add trusted markers to existing attempts', async () => {
+  const db = as('alice');
+
+  // 1. Seed a server-written trusted attempt (with scoredBy: "server")
+  const serverAttemptId = 'att-server-1';
+  await seed(cloudPaths.attempt('alice', serverAttemptId), trustedAttemptDoc('alice', serverAttemptId));
+
+  // Client attempts to update the server-written attempt (denied)
+  await denied(
+    setDoc(doc(db, cloudPaths.attempt('alice', serverAttemptId)), {
+      ...v1AttemptDoc('alice', serverAttemptId),
+      score: 5,
+      percentage: 100,
+    }),
+    'updating server-written trusted attempt must be denied'
+  );
+
+  // 2. Seed a server-written attempt with reserved ID att-qs_
+  const reservedServerId = 'att-qs_server-2';
+  await seed(cloudPaths.attempt('alice', reservedServerId), trustedAttemptDoc('alice', reservedServerId));
+
+  // Client attempts to update reserved attempt (denied)
+  await denied(
+    setDoc(doc(db, cloudPaths.attempt('alice', reservedServerId)), v1AttemptDoc('alice', reservedServerId)),
+    'updating reserved attempt ID must be denied'
+  );
+
+  // 3. Normal v1 attempt exists
+  const normalId = 'att-normal-update';
+  await setDoc(doc(db, cloudPaths.attempt('alice', normalId)), v1AttemptDoc('alice', normalId));
+
+  // Control: legitimate v1 update succeeds
+  await allowed(
+    setDoc(doc(db, cloudPaths.attempt('alice', normalId)), {
+      ...v1AttemptDoc('alice', normalId),
+      score: 4,
+      percentage: 80,
+    }),
+    'valid v1 attempt update must succeed'
+  );
+
+  // Client attempts to tamper with v1 attempt by adding trusted marker during update (denied)
+  await denied(
+    setDoc(doc(db, cloudPaths.attempt('alice', normalId)), {
+      ...v1AttemptDoc('alice', normalId),
+      scoredBy: 'server',
+    }),
+    'updating v1 attempt to add scoredBy must be denied'
+  );
+  await denied(
+    setDoc(doc(db, cloudPaths.attempt('alice', normalId)), {
+      ...v1AttemptDoc('alice', normalId),
+      schemaVersion: 2,
+    }),
+    'updating v1 attempt to add schemaVersion must be denied'
+  );
+  await denied(
+    setDoc(doc(db, cloudPaths.attempt('alice', normalId)), {
+      ...v1AttemptDoc('alice', normalId),
+      contextType: 'syllabus',
+    }),
+    'updating v1 attempt to add contextType must be denied'
+  );
+});
+
+test('Stage D - chunk subcollection security: chunks cannot be attached to trusted or reserved attempts', async () => {
+  const db = as('alice');
+
+  // 1. Seed a server-written trusted attempt
+  const trustedId = 'att-trusted-chunks';
+  await seed(cloudPaths.attempt('alice', trustedId), trustedAttemptDoc('alice', trustedId, {
+    payloadEncoding: 'chunked',
+    chunkCount: 1,
+    payloadBytes: 500,
+    payloadChecksum: 'test1234',
+    attemptJson: '',
+  }));
+
+  // Client chunk creation under trusted attempt is denied
+  await denied(
+    setDoc(doc(db, cloudPaths.chunk(cloudPaths.attempt('alice', trustedId), 0)), validChunkDoc('alice', 0)),
+    'client chunk creation under trusted attempt must be denied'
+  );
+
+  // Seed an existing chunk under trusted attempt, client update of chunk is denied
+  await seed(cloudPaths.chunk(cloudPaths.attempt('alice', trustedId), 0), validChunkDoc('alice', 0));
+  await denied(
+    setDoc(doc(db, cloudPaths.chunk(cloudPaths.attempt('alice', trustedId), 0)), validChunkDoc('alice', 0, 'tampered-chunk')),
+    'client chunk update under trusted attempt must be denied'
+  );
+
+  // 2. Client chunk creation under reserved att-qs_ ID is denied
+  const reservedId = 'att-qs_chunk-target';
+  await denied(
+    setDoc(doc(db, cloudPaths.chunk(cloudPaths.attempt('alice', reservedId), 0)), validChunkDoc('alice', 0)),
+    'chunk creation under reserved ID must be denied'
+  );
+
+  // 3. Client chunk creation with nonexistent parent is denied
+  await denied(
+    setDoc(doc(db, cloudPaths.chunk(cloudPaths.attempt('alice', 'att-nonexistent'), 0)), validChunkDoc('alice', 0)),
+    'chunk creation without parent must be denied'
+  );
+
+  // 4. Control: legitimate v1 chunk batch commit succeeds
+  const v1ChunkedId = 'att-v1-chunked';
+  const v1Parent = v1AttemptDoc('alice', v1ChunkedId, {
+    payloadEncoding: 'chunked',
+    chunkCount: 1,
+    payloadBytes: 500,
+    payloadChecksum: 'v1chk123',
+    attemptJson: '',
+  });
+  const batch = writeBatch(db);
+  batch.set(doc(db, cloudPaths.chunk(cloudPaths.attempt('alice', v1ChunkedId), 0)), validChunkDoc('alice', 0));
+  batch.set(doc(db, cloudPaths.attempt('alice', v1ChunkedId)), v1Parent);
+  await allowed(batch.commit(), 'v1 chunked attempt batch commit must succeed');
+
+  // Control: legitimate chunk update on existing v1 attempt succeeds
+  await allowed(
+    setDoc(doc(db, cloudPaths.chunk(cloudPaths.attempt('alice', v1ChunkedId), 0)), validChunkDoc('alice', 0, 'updated-v1-chunk')),
+    'v1 chunk update must succeed'
+  );
+
+  // Control: owner can delete chunks
+  await allowed(
+    deleteDoc(doc(db, cloudPaths.chunk(cloudPaths.attempt('alice', v1ChunkedId), 0))),
+    'owner chunk delete must succeed'
+  );
+  await allowed(
+    deleteDoc(doc(db, cloudPaths.chunk(cloudPaths.attempt('alice', trustedId), 0))),
+    'owner can delete chunk under trusted attempt during reset'
+  );
+});
+
+test('Stage D - owner can read, list, and delete trusted server attempts', async () => {
+  const db = as('alice');
+  const trustedId = 'att-qs_syllabus-physics-1';
+  await seed(cloudPaths.attempt('alice', trustedId), trustedAttemptDoc('alice', trustedId));
+
+  // Owner can read trusted attempt
+  const snapshot = await getDoc(doc(db, cloudPaths.attempt('alice', trustedId)));
+  assert.equal(snapshot.exists(), true);
+  assert.equal(snapshot.data()?.scoredBy, 'server');
+
+  // Owner can list attempts collection containing trusted attempt
+  const listSnap = await getDocs(collection(db, cloudPaths.attempts('alice')));
+  assert.equal(listSnap.docs.some((d) => d.id === trustedId), true);
+
+  // Owner can delete trusted attempt (for progress reset)
+  await allowed(deleteDoc(doc(db, cloudPaths.attempt('alice', trustedId))), 'owner can delete trusted attempt');
+  const afterDelete = await getDoc(doc(db, cloudPaths.attempt('alice', trustedId)));
+  assert.equal(afterDelete.exists(), false);
+});
+
+test('Stage D - cross-user and unauthenticated attempts isolation', async () => {
+  const aliceId = 'att-alice-1';
+  const trustedAliceId = 'att-qs_alice-trusted';
+  await seed(cloudPaths.attempt('alice', aliceId), v1AttemptDoc('alice', aliceId));
+  await seed(cloudPaths.attempt('alice', trustedAliceId), trustedAttemptDoc('alice', trustedAliceId));
+
+  const bob = as('bob');
+  const anon = anonymous();
+
+  // Bob cannot read, list, create, update, or delete Alice's attempts
+  await denied(getDoc(doc(bob, cloudPaths.attempt('alice', aliceId))), 'Bob cannot read Alice v1 attempt');
+  await denied(getDoc(doc(bob, cloudPaths.attempt('alice', trustedAliceId))), 'Bob cannot read Alice trusted attempt');
+  await denied(getDocs(collection(bob, cloudPaths.attempts('alice'))), 'Bob cannot list Alice attempts');
+  await denied(setDoc(doc(bob, cloudPaths.attempt('alice', 'att-bob-forged')), v1AttemptDoc('bob', 'att-bob-forged')), 'Bob cannot write to Alice');
+  await denied(deleteDoc(doc(bob, cloudPaths.attempt('alice', aliceId))), 'Bob cannot delete Alice v1 attempt');
+  await denied(deleteDoc(doc(bob, cloudPaths.attempt('alice', trustedAliceId))), 'Bob cannot delete Alice trusted attempt');
+
+  // Bob cannot read, create, update, or delete Alice's attempt chunks
+  await denied(getDoc(doc(bob, cloudPaths.chunk(cloudPaths.attempt('alice', aliceId), 0))), 'Bob cannot read Alice chunk');
+  await denied(setDoc(doc(bob, cloudPaths.chunk(cloudPaths.attempt('alice', aliceId), 0)), validChunkDoc('bob', 0)), 'Bob cannot write Alice chunk');
+  await denied(deleteDoc(doc(bob, cloudPaths.chunk(cloudPaths.attempt('alice', aliceId), 0))), 'Bob cannot delete Alice chunk');
+
+  // Anonymous user cannot read, list, create, update, or delete Alice's attempts or chunks
+  await denied(getDoc(doc(anon, cloudPaths.attempt('alice', aliceId))), 'anon cannot read attempt');
+  await denied(getDocs(collection(anon, cloudPaths.attempts('alice'))), 'anon cannot list attempts');
+  await denied(setDoc(doc(anon, cloudPaths.attempt('alice', 'att-anon')), v1AttemptDoc('alice', 'att-anon')), 'anon cannot write attempt');
+  await denied(deleteDoc(doc(anon, cloudPaths.attempt('alice', aliceId))), 'anon cannot delete attempt');
+  await denied(setDoc(doc(anon, cloudPaths.chunk(cloudPaths.attempt('alice', aliceId), 0)), validChunkDoc('alice', 0)), 'anon cannot write chunk');
 });

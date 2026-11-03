@@ -71,6 +71,14 @@ service cloud.firestore {
              isValidStorageMetadata(data);
     }
 
+    function isReservedAttemptId(attemptId) {
+      return attemptId.matches('^att-qs_.*');
+    }
+
+    function hasTrustedAttemptMarkers(data) {
+      return ('scoredBy' in data) || ('schemaVersion' in data) || ('contextType' in data);
+    }
+
     function isValidStudyState(data, userId) {
       return data.keys().hasAll(['documentId', 'uid', 'updatedAt']) &&
              data.uid is string && data.uid == userId &&
@@ -153,13 +161,27 @@ service cloud.firestore {
 
       match /attempts/{attemptId} {
         allow read: if isOwner(userId);
-        allow create, update: if isOwner(userId) && isValidQuizAttempt(request.resource.data, userId) &&
-                                 request.resource.data.id == attemptId;
+        allow create: if isOwner(userId) &&
+                         !isReservedAttemptId(attemptId) &&
+                         !hasTrustedAttemptMarkers(request.resource.data) &&
+                         isValidQuizAttempt(request.resource.data, userId) &&
+                         request.resource.data.id == attemptId;
+        allow update: if isOwner(userId) &&
+                         !isReservedAttemptId(attemptId) &&
+                         !hasTrustedAttemptMarkers(resource.data) &&
+                         !hasTrustedAttemptMarkers(request.resource.data) &&
+                         isValidQuizAttempt(request.resource.data, userId) &&
+                         request.resource.data.id == attemptId;
         allow delete: if isOwner(userId);
 
         match /chunks/{chunkId} {
           allow read, delete: if isOwner(userId);
-          allow create, update: if isOwner(userId) && isValidChunk(request.resource.data, userId, chunkId);
+          allow create, update: if isOwner(userId) &&
+                                   !isReservedAttemptId(attemptId) &&
+                                   isValidChunk(request.resource.data, userId, chunkId) &&
+                                   existsAfter(/databases/$(database)/documents/users/$(userId)/attempts/$(attemptId)) &&
+                                   !hasTrustedAttemptMarkers(getAfter(/databases/$(database)/documents/users/$(userId)/attempts/$(attemptId)).data) &&
+                                   isValidQuizAttempt(getAfter(/databases/$(database)/documents/users/$(userId)/attempts/$(attemptId)).data, userId);
         }
       }
 
