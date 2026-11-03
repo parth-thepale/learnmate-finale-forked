@@ -1,4 +1,5 @@
 import type { JeeSubjectId } from '../data/jeeMainSyllabus';
+import type { ExamTypeId } from './study';
 
 /**
  * Question, response, scoring and attempt models for JEE practice.
@@ -201,8 +202,43 @@ export interface AttemptScore extends ScoreBreakdown {
 export type AttemptKind = 'ai_practice' | 'topic_practice' | 'sectional_test' | 'full_mock';
 
 /**
+ * What an attempt practised. Always explicit on new attempts; records written before this field
+ * existed are read as document-linked only when they carry a valid documentId (never guessed).
+ *  - document: practice generated from one of the student's documents.
+ *  - syllabus: chapter/topic practice with no document (top-level documentId is "").
+ * Subject, chapter and topic ids are plain strings validated against the syllabus registry, so
+ * the shape is the same for JEE, NEET or any other registered syllabus.
+ */
+export interface DocumentAttemptContext {
+  type: 'document';
+  documentId: string;
+  documentTitle: string;
+}
+
+export interface SyllabusAttemptContext {
+  type: 'syllabus';
+  examType: ExamTypeId;
+  syllabusId: string;
+  syllabusRevision: number;
+  subjectId: string;
+  chapterId: string;
+  /** Selected topics; empty only for whole-chapter practice. */
+  topicIds: string[];
+}
+
+export type AttemptContext = DocumentAttemptContext | SyllabusAttemptContext;
+
+/**
+ * How reviewed questions are kept with the attempt. Bank/PYQ content (possibly licensed) is never
+ * copied into attempt records: those attempts keep question ids and outcomes only and fetch the
+ * review content through an authorised request.
+ */
+export type AttemptReviewMode = 'embedded' | 'by_reference';
+
+/**
  * Attempt v2: scored on the server from server-held answer keys. Stored alongside the legacy
- * QuizAttempt fields so existing progress views keep working.
+ * QuizAttempt fields so existing progress views keep working. Only the server writes trusted
+ * (scoredBy: 'server') attempts to the cloud.
  */
 export interface AttemptV2Fields {
   schemaVersion: 2;
@@ -212,6 +248,12 @@ export interface AttemptV2Fields {
   sources: QuestionSource[];
   scoredBy: 'server';
   markingSchemeId: string;
+  /** Snapshot of the registered marking scheme used (required on new attempts). */
+  marking?: MarkingScheme;
+  /** What was practised (required on new attempts; see AttemptContext). */
+  context?: AttemptContext;
+  /** Required on new attempts; bank/PYQ attempts are always 'by_reference'. */
+  reviewMode?: AttemptReviewMode;
   rawMarks: number;
   maxMarks: number;
   correctCount: number;
@@ -223,6 +265,7 @@ export interface AttemptV2Fields {
     outcome: ResponseOutcome;
     topicIds: string[];
     topicLabel: string;
+    subjectId?: string;
     chapterId?: string;
   }>;
 }
