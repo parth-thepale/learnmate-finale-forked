@@ -4,7 +4,14 @@
  * Disabled features keep their source code, but their API routes respond 404 and
  * their navigation entry points are hidden. Flip a flag (and redeploy) to re-enable.
  */
-export type LaunchFeature = 'create' | 'explore' | 'lofi' | 'liveVoice' | 'companionChat' | 'studySessionCloudSync';
+export type LaunchFeature =
+  | 'create'
+  | 'explore'
+  | 'lofi'
+  | 'liveVoice'
+  | 'companionChat'
+  | 'studySessionCloudSync'
+  | 'documentSessionMigration';
 
 export const LAUNCH_FEATURES: Readonly<Record<LaunchFeature, boolean>> = Object.freeze({
   create: false,
@@ -16,6 +23,10 @@ export const LAUNCH_FEATURES: Readonly<Record<LaunchFeature, boolean>> = Object.
   // Study sessions sync to users/{uid}/studySessions only after the rules for that collection are
   // emulator-tested and deployed. Until then sessions are kept on the device and labelled as such.
   studySessionCloudSync: false,
+  // Creates one study session per existing document (by reference) after the first full sync.
+  // Keep off until session cloud sync is enabled (otherwise deleted sessions are remembered only
+  // on the device and could be re-created after an explicit sign-out).
+  documentSessionMigration: false,
 });
 
 export function isFeatureEnabled(feature: LaunchFeature): boolean {

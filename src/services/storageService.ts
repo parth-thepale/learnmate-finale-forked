@@ -25,7 +25,7 @@ import { computeContentVersion } from '../utils/quizGrading';
 import { isFeatureEnabled } from '../config/launchFeatures';
 import type { JeeSubjectId } from '../data/jeeMainSyllabus';
 import type { StudySession } from '../types/questionBank';
-import { createSession, nextUpdatedAt, validateSession } from '../utils/sessionModel';
+import { createSession, nextUpdatedAt, planDocumentSessionMigration, validateSession } from '../utils/sessionModel';
 import {
   decodeStudySessionDoc,
   encodeStudySessionDoc,
@@ -158,6 +158,11 @@ export interface IStudyStorageRepository {
   getDeletedStudySessionIds(): string[];
   getStudySessionSyncState(id: string): StudySessionSyncState;
   isStudySessionCloudSyncEnabled(): boolean;
+  /** True once this account's first full cloud sync finished without errors (always true for guests). */
+  isInitialSyncComplete(): boolean;
+  /** Creates one session per document that has none (by reference; documents are never changed). */
+  runDocumentSessionMigration(): DocumentSessionMigrationReport;
+  getLastDocumentSessionMigrationReport(): DocumentSessionMigrationReport | null;
 
   /** Connects the cloud document store (Firestore in the app; in-memory in tests). */
   attachCloudStore(store: CloudDocStore): void;
@@ -202,6 +207,24 @@ export class StudySessionError extends Error {
     super(message);
     this.name = 'StudySessionError';
   }
+}
+
+export interface DocumentSessionMigrationReport {
+  /**
+   * completed: every eligible document has a session; partial: some documents failed;
+   * failed: nothing could be saved (retry later); not_ready: data not fully loaded yet;
+   * disabled: the documentSessionMigration feature is off.
+   */
+  status: 'completed' | 'partial' | 'failed' | 'not_ready' | 'disabled';
+  reason?: string;
+  scope: 'guest' | 'account' | 'none';
+  ranAt: string;
+  /** Documents with a valid, unique id (each can have exactly one migrated session). */
+  eligibleDocumentIds: string[];
+  migrated: Array<{ documentId: string; sessionId: string }>;
+  alreadyMigrated: string[];
+  skipped: Array<{ documentId: string; reason: string }>;
+  errors: Array<{ documentId: string; reason: string }>;
 }
 
 /** Upper bound on remembered deletions per account (ids are short; this is far above real use). */
@@ -347,10 +370,16 @@ export class HybridCloudStudyRepository implements IStudyStorageRepository {
   private readonly studySessionCloudSync: boolean;
   /** Session ids whose current version is confirmed in the cloud (this account, this run). */
   private readonly studySessionsConfirmed = new Set<string>();
+  private readonly documentSessionMigration: boolean;
+  /** Generation whose first full sync completed cleanly (null until then). */
+  private initialSyncGeneration: number | null = null;
 
-  constructor(options: { storage?: KeyValueStorage | null; studySessionCloudSync?: boolean } = {}) {
+  constructor(
+    options: { storage?: KeyValueStorage | null; studySessionCloudSync?: boolean; documentSessionMigration?: boolean } = {}
+  ) {
     this.storage = options.storage !== undefined ? options.storage : browserStorage();
     this.studySessionCloudSync = options.studySessionCloudSync ?? isFeatureEnabled('studySessionCloudSync');
+    this.documentSessionMigration = options.documentSessionMigration ?? isFeatureEnabled('documentSessionMigration');
     this.sync = new SyncStatusTracker(() => this.getUnsyncedChangeCount());
     this.sync.subscribe(() => this.notifyListeners());
   }
@@ -565,6 +594,8 @@ export class HybridCloudStudyRepository implements IStudyStorageRepository {
     this.scope = nextScope;
     this.sync.setSignedIn(Boolean(user));
     this.notifyListeners();
+    // Guest data is local only, so it is complete as soon as the scope is active.
+    if (!user && this.documentSessionMigration) this.runDocumentSessionMigration();
   }
 
   clearCurrentAccountFromDevice(): void {
@@ -912,6 +943,12 @@ export class HybridCloudStudyRepository implements IStudyStorageRepository {
             unreadable === 1 ? 'was' : 'were'
           } left unchanged.`
         );
+      }
+
+      // Migration may only use fully loaded data: a clean, complete sync of this account.
+      if (unreadable === 0) {
+        this.initialSyncGeneration = generation;
+        if (this.documentSessionMigration) this.runDocumentSessionMigration();
       }
 
       this.subscribeToCloud(uid, generation);
@@ -1300,6 +1337,75 @@ export class HybridCloudStudyRepository implements IStudyStorageRepository {
     if (changed) this.notifyListeners();
     for (const [kind, id] of toPush) void this.queueStudySessionSync(kind, id);
     return unreadable;
+  }
+
+  // -------------------------------------------------------------------------
+  // Document → study session migration (by reference)
+  // -------------------------------------------------------------------------
+
+  isInitialSyncComplete(): boolean {
+    if (!this.scope) return false;
+    if (!this.currentUser) return true;
+    return this.initialSyncGeneration === this.generation;
+  }
+
+  getLastDocumentSessionMigrationReport(): DocumentSessionMigrationReport | null {
+    return this.read<DocumentSessionMigrationReport | null>(KEYS.STUDY_SESSION_MIGRATION_REPORT, null);
+  }
+
+  /**
+   * Creates one session per document that does not have one yet, using the deterministic
+   * planner (session id sess-doc-<documentId>). Documents, attempts and per-document study state
+   * are only read. Existing sessions are never overwritten and deleted session ids are never
+   * re-created, so the migration can be re-run safely after any partial failure.
+   */
+  runDocumentSessionMigration(): DocumentSessionMigrationReport {
+    const report: DocumentSessionMigrationReport = {
+      status: 'completed',
+      scope: !this.scope ? 'none' : this.scope === 'guest' ? 'guest' : 'account',
+      ranAt: new Date().toISOString(),
+      eligibleDocumentIds: [],
+      migrated: [],
+      alreadyMigrated: [],
+      skipped: [],
+      errors: [],
+    };
+    if (!this.documentSessionMigration) return { ...report, status: 'disabled', reason: 'The documentSessionMigration feature is off.' };
+    if (!this.scope) return { ...report, status: 'not_ready', reason: 'No account scope is active.' };
+    if (!this.isInitialSyncComplete()) {
+      return { ...report, status: 'not_ready', reason: 'The first sync with your account has not finished; migration waits for complete data.' };
+    }
+
+    const documents = this.getDocuments();
+    const plan = planDocumentSessionMigration(documents, this.getStudySessions(), this.getDeletedStudySessionIds());
+    const invalid = new Set(plan.skipped.filter((s) => s.reason.startsWith('invalid') || s.reason.startsWith('duplicate')).map((s) => s.documentId));
+    report.eligibleDocumentIds = [...new Set(documents.map((d) => d?.id).filter((id): id is string => typeof id === 'string' && !invalid.has(id)))];
+    report.alreadyMigrated = [...plan.alreadyMigrated];
+    report.skipped = [...plan.skipped];
+
+    const byId = new Map(plan.toCreate.map((s) => [s.id, s]));
+    if (plan.toCreate.length > 0) {
+      try {
+        const result = this.insertStudySessions(plan.toCreate);
+        for (const id of result.inserted) report.migrated.push({ documentId: byId.get(id)!.migratedFromDocumentId!, sessionId: id });
+        for (const skip of result.skipped) {
+          const documentId = byId.get(skip.id)?.migratedFromDocumentId ?? skip.id;
+          if (skip.reason === 'already exists') report.alreadyMigrated.push(documentId);
+          else if (skip.reason === 'deleted by the student') report.skipped.push({ documentId, reason: 'its study session was deleted by the student' });
+          else report.errors.push({ documentId, reason: skip.reason });
+        }
+      } catch (err) {
+        const reason = err instanceof Error ? err.message : 'The sessions could not be saved.';
+        for (const s of plan.toCreate) report.errors.push({ documentId: s.migratedFromDocumentId!, reason });
+      }
+    }
+    if (report.errors.length > 0) {
+      report.status = report.migrated.length > 0 || report.alreadyMigrated.length > 0 ? 'partial' : 'failed';
+      report.reason = 'Some documents could not be migrated; running the migration again retries them without creating duplicates.';
+    }
+    this.write(KEYS.STUDY_SESSION_MIGRATION_REPORT, report);
+    if (report.migrated.length > 0) this.notifyListeners();
+    return report;
   }
 
   // -------------------------------------------------------------------------

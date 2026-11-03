@@ -34,6 +34,7 @@ export const STORAGE_KEYS = Object.freeze({
   // Study sessions (learning contexts). Distinct from FOCUS_SESSIONS (focus-timer history).
   STUDY_SESSIONS: 'learnmate_study_sessions_v1',
   STUDY_SESSION_TOMBSTONES: 'learnmate_study_session_tombstones_v1',
+  STUDY_SESSION_MIGRATION_REPORT: 'learnmate_study_session_migration_v1',
 });
 
 /** Device-level preferences that are safe to share between accounts on one device. */
@@ -58,6 +59,7 @@ const PRIVATE_EXACT_KEYS: ReadonlySet<string> = new Set([
   STORAGE_KEYS.SYNC_DIRTY,
   STORAGE_KEYS.STUDY_SESSIONS,
   STORAGE_KEYS.STUDY_SESSION_TOMBSTONES,
+  STORAGE_KEYS.STUDY_SESSION_MIGRATION_REPORT,
 ]);
 
 const PRIVATE_PREFIXES: readonly string[] = [

@@ -121,7 +121,8 @@ export function planDocumentSessionMigration(
   /** Ids of sessions the student deleted; they are never re-created. */
   deletedSessionIds: Iterable<string> = []
 ): DocumentMigrationPlan {
-  const existingIds = new Set([...existingSessions.map((s) => s.id), ...deletedSessionIds]);
+  const existingIds = new Set(existingSessions.map((s) => s.id));
+  const deletedIds = new Set(deletedSessionIds);
   const referenced = new Set(existingSessions.flatMap((s) => s.resourceIds));
   const plan: DocumentMigrationPlan = { toCreate: [], alreadyMigrated: [], skipped: [] };
   const seenDocs = new Set<string>();
@@ -137,6 +138,10 @@ export function planDocumentSessionMigration(
     }
     seenDocs.add(doc.id);
     const sessionId = sessionIdForDocument(doc.id);
+    if (deletedIds.has(sessionId)) {
+      plan.skipped.push({ documentId: doc.id, reason: 'its study session was deleted by the student' });
+      continue;
+    }
     if (existingIds.has(sessionId) || referenced.has(doc.id)) {
       plan.alreadyMigrated.push(doc.id);
       continue;
