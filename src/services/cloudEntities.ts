@@ -17,6 +17,7 @@ import {
   utf8ByteLength,
   INLINE_PAYLOAD_MAX_BYTES,
 } from './cloudPayload';
+import { FirestoreDataError } from '../utils/firestoreData';
 import { cloudPaths, type CloudData, type CloudDocStore, type CloudWriteOp } from './cloudStore';
 
 /**
@@ -112,8 +113,12 @@ interface DocumentPayload {
 
 const VALID_SOURCE_TYPES = new Set(['pdf', 'text', 'youtube', 'scanned_notes', 'voice_note', 'course']);
 
+/** Legacy documents may lack timestamps; the rules require both, so derive them (epoch if unknown). */
+const UNKNOWN_TIME = new Date(0).toISOString();
+
 export function encodeStudyDocument(uid: string, studyDoc: StudyDocument, previousChunkCount = 0): CloudWriteOp[] {
   const parentPath = cloudPaths.document(uid, studyDoc.id);
+  const createdAt = studyDoc.createdAt || studyDoc.lastStudiedAt || UNKNOWN_TIME;
   const base: CloudData = {
     id: studyDoc.id,
     uid,
@@ -121,8 +126,8 @@ export function encodeStudyDocument(uid: string, studyDoc: StudyDocument, previo
     sourceType: VALID_SOURCE_TYPES.has(studyDoc.sourceType) ? studyDoc.sourceType : 'text',
     pageCount: Math.max(1, Math.min(50, studyDoc.pages.length || studyDoc.pageCount || 1)),
     overview: (studyDoc.overview || '').slice(0, LEGACY_LIMITS.overview),
-    createdAt: studyDoc.createdAt,
-    lastStudiedAt: studyDoc.lastStudiedAt,
+    createdAt,
+    lastStudiedAt: studyDoc.lastStudiedAt || createdAt,
     contentVersion: studyDoc.contentVersion || '',
   };
   if (studyDoc.youtubeUrl) base.youtubeUrl = studyDoc.youtubeUrl.slice(0, 1024);
@@ -210,6 +215,11 @@ export async function decodeStudyDocument(
 
 export function encodeQuizAttempt(uid: string, attempt: QuizAttempt, previousChunkCount = 0): CloudWriteOp[] {
   const parentPath = cloudPaths.attempt(uid, attempt.id);
+  for (const field of ['id', 'documentId', 'mode', 'score', 'totalQuestions', 'percentage', 'completedAt'] as const) {
+    if (attempt[field] === undefined || attempt[field] === null) {
+      throw new FirestoreDataError(`attempt ${attempt.id ?? '(no id)'}: required field "${field}" is missing.`);
+    }
+  }
   const base: CloudData = {
     id: attempt.id,
     uid,

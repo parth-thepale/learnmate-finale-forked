@@ -2,6 +2,7 @@ import type { User } from 'firebase/auth';
 import type { CloudData, CloudDocStore, CloudWriteOp } from './cloudStore';
 import type { KeyValueStorage } from './localScope';
 import { FIRESTORE_DOCUMENT_LIMIT_BYTES, utf8ByteLength } from './cloudPayload';
+import { assertFirestoreValue } from '../utils/firestoreData';
 
 /** In-memory Storage (localStorage-compatible) with an optional byte quota. */
 export class MemoryStorage implements KeyValueStorage {
@@ -32,7 +33,7 @@ export class MemoryStorage implements KeyValueStorage {
   }
 }
 
-/** Fake Firestore: atomic batches, 1 MiB document limit, injectable failures and delays. */
+/** Fake Firestore: atomic batches, strict value checks, 1 MiB document limit, injectable failures and delays. */
 export class FakeCloudStore implements CloudDocStore {
   readonly docs = new Map<string, CloudData>();
   failCommits: false | string = false;
@@ -72,6 +73,8 @@ export class FakeCloudStore implements CloudDocStore {
         staged.delete(op.path);
         continue;
       }
+      // Mirror the Firestore SDK: undefined, nested arrays and unsupported values are rejected.
+      assertFirestoreValue(op.data);
       const next = op.merge ? { ...(staged.get(op.path) || {}), ...op.data } : { ...op.data };
       const size = utf8ByteLength(JSON.stringify(next));
       if (size > FIRESTORE_DOCUMENT_LIMIT_BYTES) {

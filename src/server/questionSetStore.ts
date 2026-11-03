@@ -1,6 +1,7 @@
 import { randomUUID } from 'crypto';
 import type { AttemptKind, McqOption, QuestionDifficulty, QuestionSource } from '../types/questionBank';
 import type { GradedQuizAttempt } from '../utils/attemptV2';
+import { FirestoreDataError, toFirestoreData } from '../utils/firestoreData';
 import type { QuotaFirestore } from './quotaStore';
 
 /**
@@ -78,6 +79,31 @@ function assertSize(set: StoredQuestionSet): void {
   if (bytes > MAX_SET_BYTES) throw new Error(`Question set is too large to store (${bytes} bytes).`);
 }
 
+const REQUIRED_SET_FIELDS = ['id', 'uid', 'kind', 'mode', 'documentId', 'documentTitle', 'createdAt', 'expiresAt', 'questions'] as const;
+const REQUIRED_QUESTION_FIELDS = ['id', 'type', 'source', 'topicLabel', 'topicIds', 'stem', 'options', 'correctOptionId', 'explanation', 'difficulty'] as const;
+const REQUIRED_ATTEMPT_FIELDS = ['id', 'questionSetId', 'kind', 'scoredBy', 'completedAt', 'answers', 'outcomes'] as const;
+
+/**
+ * Prepares a question set for an Admin SDK write: required data is checked (never dropped), and
+ * optional fields left undefined (sessionId, targetTopics, chapterId...) are omitted, because
+ * Firestore rejects undefined values.
+ */
+export function questionSetToFirestore(set: StoredQuestionSet): Record<string, unknown> {
+  const label = `question set ${set?.id ?? '(no id)'}`;
+  if (!Array.isArray(set?.questions) || set.questions.length === 0) throw new FirestoreDataError(`${label}: it has no questions.`);
+  set.questions.forEach((q, i) => {
+    toFirestoreData(q as unknown as Record<string, unknown>, { required: REQUIRED_QUESTION_FIELDS, label: `${label} question ${i + 1}` });
+  });
+  if (set.submission) {
+    if (!set.submission.submittedAt) throw new FirestoreDataError(`${label}: submission.submittedAt is missing.`);
+    toFirestoreData(set.submission.attempt as unknown as Record<string, unknown>, { required: REQUIRED_ATTEMPT_FIELDS, label: `${label} attempt` });
+  }
+  return toFirestoreData(
+    { ...set, expiresAtDate: new Date(set.expiresAt) } as unknown as Record<string, unknown>,
+    { required: REQUIRED_SET_FIELDS, label }
+  );
+}
+
 function isUsable(set: StoredQuestionSet | null | undefined, uid: string, now: Date): set is StoredQuestionSet {
   return Boolean(set && set.uid === uid && new Date(set.expiresAt).getTime() > now.getTime());
 }
@@ -139,7 +165,7 @@ export class FirestoreQuestionSetStore implements QuestionSetStore {
       await this.db.runTransaction(async (tx) => {
         const existing = await tx.get(this.ref(set.id));
         if (existing.exists) throw new Error('Question set id collision.');
-        tx.set(this.ref(set.id), { ...set, expiresAtDate: new Date(set.expiresAt) } as unknown as Record<string, unknown>);
+        tx.set(this.ref(set.id), questionSetToFirestore(set));
       });
     } catch (err) {
       throw new QuestionSetUnavailableError(err instanceof Error ? err.message.slice(0, 160) : 'create failed');
@@ -165,9 +191,9 @@ export class FirestoreQuestionSetStore implements QuestionSetStore {
         const data = snap.exists ? (snap.data() as unknown as StoredQuestionSet) : null;
         if (!isUsable(data, uid, new Date())) return null;
         if (data.submission) return { submission: data.submission, alreadySubmitted: true };
-        const updated = { ...data, submission };
+        const updated = { ...stripFirestoreFields(data), submission };
         assertSize(updated);
-        tx.set(this.ref(setId), updated as unknown as Record<string, unknown>);
+        tx.set(this.ref(setId), questionSetToFirestore(updated));
         return { submission, alreadySubmitted: false };
       });
     } catch (err) {

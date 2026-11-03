@@ -13,7 +13,7 @@ import {
   QuestionSetUnavailableError,
   UnavailableQuestionSetStore,
 } from './questionSetStore';
-import type { QuotaFirestore, QuotaTransaction } from './quotaStore';
+import { StrictFakeFirestore } from './firestoreTestDouble';
 import type { ValidatedGeneratedMcq } from '../utils/questionValidation';
 
 const generated: ValidatedGeneratedMcq[] = [
@@ -147,29 +147,8 @@ test('production without credentials fails closed for practice sets', async () =
   await assert.rejects(store.get('alice', 'qs_x'), QuestionSetUnavailableError);
 });
 
-class FakeFirestore implements QuotaFirestore {
-  docs = new Map<string, Record<string, unknown>>();
-  collection(path: string) {
-    return { doc: (id: string) => `${path}/${id}` };
-  }
-  async runTransaction<T>(fn: (tx: QuotaTransaction) => Promise<T>): Promise<T> {
-    const writes: Array<[string, Record<string, unknown>]> = [];
-    const result = await fn({
-      get: async (ref) => {
-        const data = this.docs.get(ref as string);
-        return { exists: data !== undefined, data: () => (data ? structuredClone(data) : undefined) };
-      },
-      set: (ref, data) => {
-        writes.push([ref as string, structuredClone(data)]);
-      },
-    });
-    for (const [ref, data] of writes) this.docs.set(ref, data);
-    return result;
-  }
-}
-
 test('Firestore question-set store enforces ownership and single submission', async () => {
-  const db = new FakeFirestore();
+  const db = new StrictFakeFirestore();
   const store = new FirestoreQuestionSetStore(db);
   const set = makeSet('alice', new Date());
   await store.create(set);

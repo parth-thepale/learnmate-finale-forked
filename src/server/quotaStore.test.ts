@@ -7,9 +7,8 @@ import {
   UnavailableDailyQuotaStore,
   quotaDayKey,
   quotaResetsAt,
-  type QuotaFirestore,
-  type QuotaTransaction,
 } from './quotaStore.ts';
+import { StrictFakeFirestore } from './firestoreTestDouble';
 
 test('quota days roll over at midnight IST, not UTC', () => {
   // 18:29 UTC = 23:59 IST on 3 Nov
@@ -45,44 +44,8 @@ test('unavailable store always fails closed', async () => {
   await assert.rejects(new UnavailableDailyQuotaStore('missing').consume(), QuotaUnavailableError);
 });
 
-/** Fake Firestore that serialises transactions, like the real service does per document. */
-class FakeFirestore implements QuotaFirestore {
-  docs = new Map<string, Record<string, unknown>>();
-  failNext = false;
-  private queue: Promise<unknown> = Promise.resolve();
-
-  collection(path: string) {
-    return { doc: (id: string) => `${path}/${id}` };
-  }
-
-  runTransaction<T>(fn: (tx: QuotaTransaction) => Promise<T>): Promise<T> {
-    const run = async () => {
-      if (this.failNext) {
-        this.failNext = false;
-        throw new Error('PERMISSION_DENIED: Missing or insufficient permissions.');
-      }
-      const writes: Array<[string, Record<string, unknown>]> = [];
-      const tx: QuotaTransaction = {
-        get: async (ref) => {
-          const data = this.docs.get(ref as string);
-          return { exists: data !== undefined, data: () => data };
-        },
-        set: (ref, data) => {
-          writes.push([ref as string, data]);
-        },
-      };
-      const result = await fn(tx);
-      for (const [ref, data] of writes) this.docs.set(ref, data);
-      return result;
-    };
-    const next = this.queue.then(run, run);
-    this.queue = next.catch(() => undefined);
-    return next;
-  }
-}
-
 test('Firestore store persists usage per user/day and never exceeds the limit under concurrency', async () => {
-  const db = new FakeFirestore();
+  const db = new StrictFakeFirestore();
   const store = new FirestoreDailyQuotaStore(db);
   const now = new Date('2026-11-03T05:00:00Z');
 
@@ -103,8 +66,8 @@ test('Firestore store persists usage per user/day and never exceeds the limit un
 });
 
 test('Firestore errors surface as QuotaUnavailableError (fail closed)', async () => {
-  const db = new FakeFirestore();
-  db.failNext = true;
+  const db = new StrictFakeFirestore();
+  db.failNext = 'PERMISSION_DENIED: Missing or insufficient permissions.';
   const store = new FirestoreDailyQuotaStore(db);
   await assert.rejects(store.consume('alice', 1, 5), QuotaUnavailableError);
 });

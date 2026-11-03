@@ -3,6 +3,8 @@
  * Cloud Firestore (firestoreCloudStore.ts); tests use an in-memory implementation.
  */
 
+import { toFirestoreData } from '../utils/firestoreData';
+
 export type CloudData = Record<string, unknown>;
 
 export type CloudWriteOp =
@@ -19,6 +21,22 @@ export interface CloudDocStore {
     onChange: (docs: Array<{ id: string; data: CloudData }>) => void,
     onError: (err: unknown) => void
   ): () => void;
+}
+
+/**
+ * Wraps a store so every write is Firestore-safe: optional fields left undefined are omitted
+ * (both Firestore SDKs reject undefined), null is kept, and unrepresentable values fail the write
+ * with a clear error instead of being altered. Reads and deletes pass through unchanged.
+ */
+export function withFirestoreSafeWrites(store: CloudDocStore): CloudDocStore {
+  return {
+    getDoc: (path) => store.getDoc(path),
+    listCollection: (path) => store.listCollection(path),
+    subscribeCollection: (path, onChange, onError) => store.subscribeCollection(path, onChange, onError),
+    // async so preparation errors reject (and are tracked as failed writes) instead of throwing.
+    commit: async (ops) =>
+      store.commit(ops.map((op) => (op.type === 'set' ? { ...op, data: toFirestoreData(op.data, { label: op.path }) } : op))),
+  };
 }
 
 export const cloudPaths = {

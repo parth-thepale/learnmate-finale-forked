@@ -39,7 +39,7 @@ import {
   type LegacyMigrationResult,
   type LocalScope,
 } from './localScope';
-import { cloudPaths, isSafeCloudId, type CloudDocStore, type CloudWriteOp } from './cloudStore';
+import { cloudPaths, isSafeCloudId, withFirestoreSafeWrites, type CloudDocStore, type CloudWriteOp } from './cloudStore';
 import {
   chunkCountOf,
   decodeQuizAttempt,
@@ -404,7 +404,7 @@ export class HybridCloudStudyRepository implements IStudyStorageRepository {
   }
 
   attachCloudStore(store: CloudDocStore): void {
-    this.cloud = store;
+    this.cloud = withFirestoreSafeWrites(store);
   }
 
   // -------------------------------------------------------------------------

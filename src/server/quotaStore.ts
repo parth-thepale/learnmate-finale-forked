@@ -6,6 +6,8 @@
  * MemoryDailyQuotaStore is for local development and tests only.
  */
 
+import { toFirestoreData } from '../utils/firestoreData';
+
 /** Quota days roll over at midnight India Standard Time (UTC+05:30). */
 export const QUOTA_DAY_UTC_OFFSET_MINUTES = 330;
 
@@ -118,7 +120,7 @@ export class FirestoreDailyQuotaStore implements DailyQuotaStore {
           return { allowed: false, used, limit, day, resetsAt: resets.toISOString() };
         }
 
-        tx.set(ref, {
+        tx.set(ref, toFirestoreData({
           uid,
           day,
           units: used + units,
@@ -126,7 +128,7 @@ export class FirestoreDailyQuotaStore implements DailyQuotaStore {
           updatedAt: now.toISOString(),
           // Optional Firestore TTL policy target: documents can be purged a week after the day ends.
           expireAt: new Date(resets.getTime() + 7 * 24 * 60 * 60 * 1000),
-        });
+        }, { required: ['uid', 'day', 'units', 'requests'], label: 'quota counter' }));
         return { allowed: true, used: used + units, limit, day, resetsAt: resets.toISOString() };
       });
     } catch (err) {
