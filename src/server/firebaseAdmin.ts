@@ -11,6 +11,12 @@ import {
   type DailyQuotaStore,
   type QuotaFirestore,
 } from './quotaStore.ts';
+import {
+  FirestoreQuestionSetStore,
+  MemoryQuestionSetStore,
+  UnavailableQuestionSetStore,
+  type QuestionSetStore,
+} from './questionSetStore.ts';
 
 export type AdminCredentialMode = 'service_account_json' | 'application_default' | 'none';
 
@@ -95,6 +101,7 @@ export interface ServerFirebaseAdmin {
   config: AdminCredentialConfig;
   verifyIdToken: IdTokenVerifier;
   quotaStore: DailyQuotaStore;
+  questionSetStore: QuestionSetStore;
 }
 
 /**
@@ -142,17 +149,21 @@ export function initServerFirebaseAdmin(params: {
   };
 
   let quotaStore: DailyQuotaStore;
+  let questionSetStore: QuestionSetStore;
   if (app && config.mode !== 'none') {
     const db =
       config.databaseId && config.databaseId !== '(default)' ? getFirestore(app, config.databaseId) : getFirestore(app);
     quotaStore = new FirestoreDailyQuotaStore(db as unknown as QuotaFirestore);
+    questionSetStore = new FirestoreQuestionSetStore(db as unknown as QuotaFirestore);
   } else if (!params.isProduction) {
     quotaStore = new MemoryDailyQuotaStore();
+    questionSetStore = new MemoryQuestionSetStore();
   } else {
-    quotaStore = new UnavailableDailyQuotaStore(
-      'Firebase Admin credentials are not configured (set FIREBASE_SERVICE_ACCOUNT_JSON or GOOGLE_APPLICATION_CREDENTIALS).'
-    );
+    const reason =
+      'Firebase Admin credentials are not configured (set FIREBASE_SERVICE_ACCOUNT_JSON or GOOGLE_APPLICATION_CREDENTIALS).';
+    quotaStore = new UnavailableDailyQuotaStore(reason);
+    questionSetStore = new UnavailableQuestionSetStore(reason);
   }
 
-  return { config, verifyIdToken, quotaStore };
+  return { config, verifyIdToken, quotaStore, questionSetStore };
 }

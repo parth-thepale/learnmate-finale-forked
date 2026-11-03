@@ -33,7 +33,7 @@ import {
 import type {
   StudyDocument,
   TutorMessage,
-  QuizQuestion,
+  PracticeQuizQuestion,
   QuizAttempt,
   MistakeInsight,
   RevisionTask,
@@ -41,10 +41,9 @@ import type {
   SourceControlMode,
   TeachItBackEvaluation,
 } from '../types/study';
-import { aiStudyClient } from '../services/aiClient';
+import { aiStudyClient, ApiRequestError } from '../services/aiClient';
 import { studyStorage } from '../services/storageService';
 import {
-  gradeQuizSubmission,
   updateRevisionPlanWithAttempt,
   computeTopicProgress,
   computeOverallProgressSummary,
@@ -183,7 +182,11 @@ export const StudyView: React.FC<StudyViewProps> = ({
   }, [tutorMessages, isAskingTutor]);
 
   // Diagnostic Quiz state
-  const [quizQuestions, setQuizQuestions] = useState<QuizQuestion[]>([]);
+  const [quizQuestions, setQuizQuestions] = useState<PracticeQuizQuestion[]>([]);
+  const [quizSetId, setQuizSetId] = useState<string | null>(null);
+  const [isSubmittingQuiz, setIsSubmittingQuiz] = useState(false);
+  const [quizSubmitError, setQuizSubmitError] = useState<string | null>(null);
+  const [mistakesError, setMistakesError] = useState<string | null>(null);
   const [currentQuestionIdx, setCurrentQuestionIdx] = useState(0);
   const [selectedAnswers, setSelectedAnswers] = useState<Record<string, number>>({});
   const [latestDiagnosticAttempt, setLatestDiagnosticAttempt] = useState<QuizAttempt | null>(null);
@@ -198,7 +201,10 @@ export const StudyView: React.FC<StudyViewProps> = ({
 
   // Adaptive Practice state
   const [adaptiveFocusTopics, setAdaptiveFocusTopics] = useState<string[]>([]);
-  const [adaptiveQuestions, setAdaptiveQuestions] = useState<QuizQuestion[]>([]);
+  const [adaptiveQuestions, setAdaptiveQuestions] = useState<PracticeQuizQuestion[]>([]);
+  const [adaptiveSetId, setAdaptiveSetId] = useState<string | null>(null);
+  const [adaptiveError, setAdaptiveError] = useState<string | null>(null);
+  const [isSubmittingAdaptive, setIsSubmittingAdaptive] = useState(false);
   const [adaptiveQuestionIdx, setAdaptiveQuestionIdx] = useState(0);
   const [adaptiveSelected, setAdaptiveSelected] = useState<Record<string, number>>({});
   const [latestAdaptiveAttempt, setLatestAdaptiveAttempt] = useState<QuizAttempt | null>(null);
@@ -222,7 +228,10 @@ export const StudyView: React.FC<StudyViewProps> = ({
     setTutorMessages(savedTutor);
 
     const cachedQuiz = studyStorage.getCachedQuiz(activeDocument.id, 'diagnostic');
-    setQuizQuestions(cachedQuiz || []);
+    setQuizQuestions(cachedQuiz?.questions || []);
+    setQuizSetId(cachedQuiz?.setId || null);
+    setMistakesError(null);
+    setAdaptiveError(null);
     setCurrentQuestionIdx(0);
     setSelectedAnswers({});
 
@@ -248,6 +257,7 @@ export const StudyView: React.FC<StudyViewProps> = ({
         : activeDocument.topics.slice(0, 2).map((t) => t.name)
     );
     setAdaptiveQuestions([]);
+    setAdaptiveSetId(null);
     setAdaptiveSelected({});
   }, [activeDocument.id]);
 
@@ -259,8 +269,9 @@ export const StudyView: React.FC<StudyViewProps> = ({
       !isGeneratingQuiz
     ) {
       const cached = studyStorage.getCachedQuiz(activeDocument.id, 'diagnostic');
-      if (cached && cached.length >= 5) {
-        setQuizQuestions(cached);
+      if (cached) {
+        setQuizQuestions(cached.questions);
+        setQuizSetId(cached.setId);
       } else {
         void handleGenerateDiagnosticQuiz(false);
       }
@@ -428,8 +439,9 @@ export const StudyView: React.FC<StudyViewProps> = ({
 
     if (!forceRefresh) {
       const cached = studyStorage.getCachedQuiz(activeDocument.id, 'diagnostic');
-      if (cached && cached.length >= 5) {
-        setQuizQuestions(cached);
+      if (cached) {
+        setQuizQuestions(cached.questions);
+        setQuizSetId(cached.setId);
         return;
       }
     }
@@ -447,12 +459,16 @@ export const StudyView: React.FC<StudyViewProps> = ({
       });
 
       if (!res.questions || res.questions.length === 0) {
-        setQuizError(
-          res.aiNotice || 'Could not generate quiz questions for this material.'
-        );
+        setQuizError('Could not generate quiz questions for this material.');
       } else {
         setQuizQuestions(res.questions);
-        studyStorage.saveCachedQuiz(activeDocument.id, 'diagnostic', res.questions);
+        setQuizSetId(res.setId);
+        studyStorage.saveCachedQuiz(activeDocument.id, 'diagnostic', {
+          setId: res.setId,
+          questions: res.questions,
+          createdAt: new Date().toISOString(),
+          expiresAt: res.expiresAt,
+        });
       }
     } catch (err) {
       setQuizError(
@@ -466,41 +482,68 @@ export const StudyView: React.FC<StudyViewProps> = ({
   };
 
   const handleSubmitDiagnosticQuiz = async () => {
-    if (quizQuestions.length === 0) return;
+    if (quizQuestions.length === 0 || !quizSetId || isSubmittingQuiz) return;
+    setIsSubmittingQuiz(true);
+    setQuizSubmitError(null);
 
-    const gradedAttempt = gradeQuizSubmission({
-      attemptId: `att-diag-${Date.now()}`,
-      documentId: activeDocument.id,
-      documentTitle: activeDocument.title,
-      mode: 'diagnostic',
-      questions: quizQuestions,
-      selectedIndices: selectedAnswers,
-    });
+    let gradedAttempt: QuizAttempt;
+    try {
+      // Answers are graded on the server; the answer key is only revealed in the result.
+      const result = await aiStudyClient.submitPracticeSet({
+        setId: quizSetId,
+        selectedIndices: selectedAnswers,
+      });
+      gradedAttempt = result.attempt;
+    } catch (err) {
+      if (err instanceof ApiRequestError && err.code === 'set_not_found') {
+        studyStorage.clearCachedQuiz(activeDocument.id, 'diagnostic');
+        setQuizQuestions([]);
+        setQuizSetId(null);
+        setQuizError(err.message);
+      } else {
+        setQuizSubmitError(
+          err instanceof Error ? err.message : 'Your answers could not be submitted. Please try again.'
+        );
+      }
+      setIsSubmittingQuiz(false);
+      return;
+    }
 
     studyStorage.saveQuizAttempt(gradedAttempt);
+    // A submitted set is never re-served: the next diagnostic uses fresh questions.
+    studyStorage.clearCachedQuiz(activeDocument.id, 'diagnostic');
     setLatestDiagnosticAttempt(gradedAttempt);
     setAllDocAttempts(studyStorage.getQuizAttempts(activeDocument.id));
+    setIsSubmittingQuiz(false);
     onAttemptSaved();
 
     if (gradedAttempt.weakTopics.length > 0) {
       setAdaptiveFocusTopics(gradedAttempt.weakTopics);
     }
 
+    // Never show mistakes from an earlier attempt as if they belonged to this one.
+    setMistakes([]);
+    setMistakesError(null);
     setIsDiagnosing(true);
     try {
       const diagnosis = await aiStudyClient.analyzeMistakesAndPlan({
-        documentId: activeDocument.id,
+        setId: quizSetId,
         title: activeDocument.title,
         pages: activeDocument.pages,
-        attempt: gradedAttempt,
       });
 
       setMistakes(diagnosis.mistakes);
       setRevisionPlan(diagnosis.revisionPlan);
       studyStorage.saveMistakeInsights(activeDocument.id, diagnosis.mistakes);
       studyStorage.saveRevisionPlan(activeDocument.id, diagnosis.revisionPlan);
-    } catch {
-      // Handled gracefully
+      if (diagnosis.aiNotice) setMistakesError(diagnosis.aiNotice);
+    } catch (err) {
+      studyStorage.saveMistakeInsights(activeDocument.id, []);
+      setMistakesError(
+        err instanceof Error
+          ? `Mistake analysis could not be completed: ${err.message}`
+          : 'Mistake analysis could not be completed. Your score is saved.'
+      );
     } finally {
       setIsDiagnosing(false);
     }
@@ -531,6 +574,9 @@ export const StudyView: React.FC<StudyViewProps> = ({
     setLatestAdaptiveAttempt(null);
     setAdaptiveSelected({});
     setAdaptiveQuestionIdx(0);
+    setAdaptiveQuestions([]);
+    setAdaptiveSetId(null);
+    setAdaptiveError(null);
     setIsGeneratingAdaptive(true);
 
     try {
@@ -544,34 +590,36 @@ export const StudyView: React.FC<StudyViewProps> = ({
         questionCount: 5,
       });
       setAdaptiveQuestions(res.questions);
+      setAdaptiveSetId(res.setId);
     } catch (err) {
-      setQuizError(err instanceof Error ? err.message : 'Failed to generate adaptive questions.');
+      setAdaptiveError(err instanceof Error ? err.message : 'Failed to generate adaptive questions.');
     } finally {
       setIsGeneratingAdaptive(false);
     }
   };
 
-  const handleSubmitAdaptivePractice = () => {
-    if (adaptiveQuestions.length === 0) return;
+  const handleSubmitAdaptivePractice = async () => {
+    if (adaptiveQuestions.length === 0 || !adaptiveSetId || isSubmittingAdaptive) return;
+    setIsSubmittingAdaptive(true);
+    setAdaptiveError(null);
+    try {
+      const { attempt: gradedAdaptive } = await aiStudyClient.submitPracticeSet({
+        setId: adaptiveSetId,
+        selectedIndices: adaptiveSelected,
+      });
+      studyStorage.saveQuizAttempt(gradedAdaptive);
+      setLatestAdaptiveAttempt(gradedAdaptive);
+      setAllDocAttempts(studyStorage.getQuizAttempts(activeDocument.id));
+      onAttemptSaved();
 
-    const gradedAdaptive = gradeQuizSubmission({
-      attemptId: `att-adapt-${Date.now()}`,
-      documentId: activeDocument.id,
-      documentTitle: activeDocument.title,
-      mode: 'adaptive',
-      targetTopics: adaptiveFocusTopics,
-      questions: adaptiveQuestions,
-      selectedIndices: adaptiveSelected,
-    });
-
-    studyStorage.saveQuizAttempt(gradedAdaptive);
-    setLatestAdaptiveAttempt(gradedAdaptive);
-    setAllDocAttempts(studyStorage.getQuizAttempts(activeDocument.id));
-    onAttemptSaved();
-
-    const updatedPlan = updateRevisionPlanWithAttempt(revisionPlan, gradedAdaptive);
-    setRevisionPlan(updatedPlan);
-    studyStorage.saveRevisionPlan(activeDocument.id, updatedPlan);
+      const updatedPlan = updateRevisionPlanWithAttempt(revisionPlan, gradedAdaptive);
+      setRevisionPlan(updatedPlan);
+      studyStorage.saveRevisionPlan(activeDocument.id, updatedPlan);
+    } catch (err) {
+      setAdaptiveError(err instanceof Error ? err.message : 'Your answers could not be submitted. Please try again.');
+    } finally {
+      setIsSubmittingAdaptive(false);
+    }
   };
 
   const activeDiagnosticQuestion = quizQuestions[currentQuestionIdx];
@@ -2774,13 +2822,21 @@ export const StudyView: React.FC<StudyViewProps> = ({
                           Next Question →
                         </button>
                       ) : (
-                        <button
-                          type="button"
-                          onClick={() => void handleSubmitDiagnosticQuiz()}
-                          className="px-6 py-2.5 rounded-full bg-[#34A853] hover:bg-emerald-700 text-white text-sm font-semibold shadow-2xs cursor-pointer"
-                        >
-                          Submit Quiz
-                        </button>
+                        <div className="flex flex-col items-end gap-1">
+                          <button
+                            type="button"
+                            onClick={() => void handleSubmitDiagnosticQuiz()}
+                            disabled={isSubmittingQuiz}
+                            className="px-6 py-2.5 rounded-full bg-[#34A853] hover:bg-emerald-700 text-white text-sm font-semibold shadow-2xs cursor-pointer disabled:opacity-60 disabled:cursor-wait"
+                          >
+                            {isSubmittingQuiz ? 'Grading…' : 'Submit Quiz'}
+                          </button>
+                          {quizSubmitError && (
+                            <p role="alert" className="text-xs text-red-700 max-w-xs text-right">
+                              {quizSubmitError}
+                            </p>
+                          )}
+                        </div>
                       )}
                     </div>
                   </div>
@@ -2858,17 +2914,37 @@ export const StudyView: React.FC<StudyViewProps> = ({
                   </button>
                 </div>
               ) : mistakes.length === 0 ? (
-                <div className="p-6 rounded-2xl bg-emerald-50 border border-emerald-200 text-center space-y-2 max-w-lg mx-auto">
-                  <CheckCircle2 className="w-8 h-8 text-[#34A853] mx-auto" />
-                  <h3 className="text-lg font-semibold text-emerald-950">
-                    Zero Misconceptions Detected!
-                  </h3>
-                  <p className="text-base text-emerald-800">
-                    You answered 100% of the diagnostic questions correctly.
-                  </p>
-                </div>
+                mistakesError ? (
+                  <div role="alert" className="p-6 rounded-2xl bg-red-50 border border-red-200 text-center space-y-2 max-w-lg mx-auto">
+                    <h3 className="text-lg font-semibold text-red-900">Mistake analysis unavailable</h3>
+                    <p className="text-base text-red-800">{mistakesError}</p>
+                    <p className="text-sm text-red-700">
+                      Your score is saved. The quiz results still show the correct answers and explanations.
+                    </p>
+                  </div>
+                ) : latestDiagnosticAttempt && latestDiagnosticAttempt.percentage === 100 ? (
+                  <div className="p-6 rounded-2xl bg-emerald-50 border border-emerald-200 text-center space-y-2 max-w-lg mx-auto">
+                    <CheckCircle2 className="w-8 h-8 text-[#34A853] mx-auto" />
+                    <h3 className="text-lg font-semibold text-emerald-950">No mistakes in this quiz</h3>
+                    <p className="text-base text-emerald-800">
+                      You answered every question in your latest diagnostic quiz correctly.
+                    </p>
+                  </div>
+                ) : (
+                  <div className="p-6 rounded-2xl bg-slate-50 border border-slate-200 text-center space-y-2 max-w-lg mx-auto">
+                    <h3 className="text-lg font-semibold text-slate-900">No incorrect answers to analyse</h3>
+                    <p className="text-base text-slate-700">
+                      Questions you left unanswered are listed in your revision plan.
+                    </p>
+                  </div>
+                )
               ) : (
                 <div className="space-y-4 max-w-[65ch]">
+                  {mistakesError && (
+                    <p role="status" className="text-sm text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+                      {mistakesError}
+                    </p>
+                  )}
                   {mistakes.map((item, idx) => (
                     <div
                       key={item.questionId || idx}
@@ -2876,7 +2952,7 @@ export const StudyView: React.FC<StudyViewProps> = ({
                     >
                       <div className="flex items-center justify-between gap-2">
                         <span className="text-xs font-semibold text-amber-800 bg-amber-50 px-2.5 py-1 rounded-md">
-                          Weak Topic: {item.topic}
+                          Topic: {item.topic}
                         </span>
                         <button
                           type="button"
@@ -2942,7 +3018,7 @@ export const StudyView: React.FC<StudyViewProps> = ({
                     className="inline-flex items-center gap-1.5 px-4 py-2 rounded-full bg-[#172033] hover:bg-slate-800 text-white text-[14px] font-semibold cursor-pointer"
                   >
                     <Zap className="w-3.5 h-3.5" />
-                    <span>Practice Weak Topics</span>
+                    <span>Practise Missed Topics</span>
                   </button>
                 )}
               </div>
@@ -2979,9 +3055,11 @@ export const StudyView: React.FC<StudyViewProps> = ({
                         <span className="text-xs font-semibold uppercase tracking-wide text-[#1A73E8]">
                           Next Recommended Learning Action
                         </span>
-                        <span className="text-xs font-medium text-slate-600">
-                          Page {nextRecommendedTask.sourcePage}
-                        </span>
+                        {nextRecommendedTask.sourcePage > 0 && (
+                          <span className="text-xs font-medium text-slate-600">
+                            Page {nextRecommendedTask.sourcePage}
+                          </span>
+                        )}
                       </div>
                       <h3 className="text-lg font-semibold text-[#172033]">
                         {nextRecommendedTask.topic}
@@ -2990,18 +3068,20 @@ export const StudyView: React.FC<StudyViewProps> = ({
                         {nextRecommendedTask.recommendedAction}
                       </p>
                       <div className="flex flex-wrap items-center gap-2.5 pt-1">
-                        <button
-                          type="button"
-                          onClick={() =>
-                            navigateToCitation(
-                              nextRecommendedTask.sourcePage,
-                              nextRecommendedTask.conceptSummary
-                            )
-                          }
-                          className="px-4 py-2 rounded-full bg-white border border-blue-200 text-[#1A73E8] text-sm font-semibold hover:bg-blue-50 transition-colors cursor-pointer"
-                        >
-                          Review Page {nextRecommendedTask.sourcePage}
-                        </button>
+                        {nextRecommendedTask.sourcePage > 0 && (
+                          <button
+                            type="button"
+                            onClick={() =>
+                              navigateToCitation(
+                                nextRecommendedTask.sourcePage,
+                                nextRecommendedTask.conceptSummary
+                              )
+                            }
+                            className="px-4 py-2 rounded-full bg-white border border-blue-200 text-[#1A73E8] text-sm font-semibold hover:bg-blue-50 transition-colors cursor-pointer"
+                          >
+                            Review Page {nextRecommendedTask.sourcePage}
+                          </button>
+                        )}
                         <button
                           type="button"
                           onClick={() =>
@@ -3063,15 +3143,17 @@ export const StudyView: React.FC<StudyViewProps> = ({
                             </div>
                           </label>
 
-                          <button
-                            type="button"
-                            onClick={() =>
-                              navigateToCitation(task.sourcePage, task.conceptSummary)
-                            }
-                            className="px-3 py-1 rounded-lg bg-[#F8FAFC] border border-slate-200 text-[#1A73E8] text-xs font-semibold hover:bg-[#E8F0FE] shrink-0 cursor-pointer"
-                          >
-                            Page {task.sourcePage}
-                          </button>
+                          {task.sourcePage > 0 && (
+                            <button
+                              type="button"
+                              onClick={() =>
+                                navigateToCitation(task.sourcePage, task.conceptSummary)
+                              }
+                              className="px-3 py-1 rounded-lg bg-[#F8FAFC] border border-slate-200 text-[#1A73E8] text-xs font-semibold hover:bg-[#E8F0FE] shrink-0 cursor-pointer"
+                            >
+                              Page {task.sourcePage}
+                            </button>
+                          )}
                         </div>
 
                         <div className="pl-7 flex items-center gap-4 pt-1">
@@ -3155,6 +3237,17 @@ export const StudyView: React.FC<StudyViewProps> = ({
                   <p className="text-base font-medium text-slate-800">
                     Generating targeted practice questions for {adaptiveFocusTopics.join(', ')}...
                   </p>
+                </div>
+              ) : adaptiveError && adaptiveQuestions.length === 0 && !latestAdaptiveAttempt ? (
+                <div role="alert" className="py-12 text-center space-y-3 max-w-md mx-auto">
+                  <p className="text-base font-medium text-red-700">{adaptiveError}</p>
+                  <button
+                    type="button"
+                    onClick={() => void handleStartAdaptivePractice()}
+                    className="px-5 py-2.5 rounded-full bg-[#172033] text-white text-[14px] font-semibold cursor-pointer"
+                  >
+                    Try again
+                  </button>
                 </div>
               ) : latestAdaptiveAttempt ? (
                 <div className="space-y-5 overflow-y-auto max-h-[420px] max-w-[65ch]">
@@ -3302,13 +3395,21 @@ export const StudyView: React.FC<StudyViewProps> = ({
                         Next →
                       </button>
                     ) : (
-                      <button
-                        type="button"
-                        onClick={handleSubmitAdaptivePractice}
-                        className="px-6 py-2.5 rounded-full bg-[#34A853] hover:bg-emerald-700 text-white text-[14px] font-semibold cursor-pointer"
-                      >
-                        Submit Adaptive Practice
-                      </button>
+                      <div className="flex flex-col items-end gap-1">
+                        <button
+                          type="button"
+                          onClick={() => void handleSubmitAdaptivePractice()}
+                          disabled={isSubmittingAdaptive}
+                          className="px-6 py-2.5 rounded-full bg-[#34A853] hover:bg-emerald-700 text-white text-[14px] font-semibold cursor-pointer disabled:opacity-60 disabled:cursor-wait"
+                        >
+                          {isSubmittingAdaptive ? 'Grading…' : 'Submit Adaptive Practice'}
+                        </button>
+                        {adaptiveError && (
+                          <p role="alert" className="text-xs text-red-700 max-w-xs text-right">
+                            {adaptiveError}
+                          </p>
+                        )}
+                      </div>
                     )}
                   </div>
                 </div>

@@ -19,6 +19,7 @@ import {
   computeOverallProgressSummary,
   generateStudyProgressReportText,
 } from '../utils/quizGrading';
+import { assessTopics } from '../utils/weakTopics';
 import { studyStorage } from '../services/storageService';
 
 interface ProgressViewProps {
@@ -54,6 +55,12 @@ export const ProgressView: React.FC<ProgressViewProps> = ({
 
   const summary = computeOverallProgressSummary(filteredAttempts);
   const topicComparisons = computeTopicProgress(filteredAttempts);
+  // Mastery and weakness are only claimed with enough evidence across attempts.
+  const topicEvidence = assessTopics(filteredAttempts);
+  const evidenceByLabel = new Map(topicEvidence.map((e) => [e.label.trim().toLowerCase(), e]));
+  const strongTopicCount = topicEvidence.filter((e) => e.status === 'strong').length;
+  const weakTopicCount = topicEvidence.filter((e) => e.status === 'weak').length;
+  const insufficientTopicCount = topicEvidence.filter((e) => e.status === 'insufficient_evidence').length;
 
   const handleDownloadReport = () => {
     const targetDocs =
@@ -247,10 +254,11 @@ export const ProgressView: React.FC<ProgressViewProps> = ({
             <div className="p-5 rounded-2xl bg-[#FDF4F4] border border-red-100 space-y-1">
               <span className="text-xs font-semibold text-slate-500">Topic Mastery Status</span>
               <p className="text-3xl font-extrabold text-slate-900 tabular-nums">
-                {summary.masteredTopicsCount} Mastered
+                {strongTopicCount} Strong
               </p>
               <p className="text-xs text-slate-600 tabular-nums">
-                {summary.weakTopicsCount} topic(s) need focused review
+                {weakTopicCount} topic(s) need focused review
+                {insufficientTopicCount > 0 ? ` · ${insufficientTopicCount} need more practice data` : ''}
               </p>
             </div>
           </div>
@@ -281,17 +289,20 @@ export const ProgressView: React.FC<ProgressViewProps> = ({
                         · {item.totalCorrect}/{item.totalQuestions} correct across {item.attemptsCount}{' '}
                         {item.attemptsCount === 1 ? 'attempt' : 'attempts'}
                       </span>
-                      {item.status === 'mastered' && (
+                      {evidenceByLabel.get(item.topic.trim().toLowerCase())?.status === 'strong' && (
                         <span className="inline-flex items-center gap-1 text-xs font-bold text-emerald-700">
-                          <CheckCircle2 className="w-3.5 h-3.5" /> Mastered
+                          <CheckCircle2 className="w-3.5 h-3.5" /> Strong
                         </span>
+                      )}
+                      {evidenceByLabel.get(item.topic.trim().toLowerCase())?.status === 'insufficient_evidence' && (
+                        <span className="text-xs font-medium text-slate-500">Not enough data yet</span>
                       )}
                       {item.status === 'improved' && (
                         <span className="inline-flex items-center gap-1 text-xs font-bold text-[#1A73E8]">
                           <Award className="w-3.5 h-3.5" /> Improved (+{item.deltaPct}%)
                         </span>
                       )}
-                      {item.status === 'needs-work' && (
+                      {evidenceByLabel.get(item.topic.trim().toLowerCase())?.status === 'weak' && (
                         <span className="inline-flex items-center gap-1 text-xs font-bold text-red-600">
                           <AlertCircle className="w-3.5 h-3.5" /> Needs Practice
                         </span>
@@ -348,7 +359,7 @@ export const ProgressView: React.FC<ProgressViewProps> = ({
                       <Clock className="w-3.5 h-3.5" />
                       <span>{new Date(attempt.completedAt).toLocaleString()}</span>
                       {attempt.weakTopics.length > 0 && (
-                        <span>· Focus areas: {attempt.weakTopics.join(', ')}</span>
+                        <span>· Missed in this attempt: {attempt.weakTopics.join(', ')}</span>
                       )}
                     </div>
                   </div>

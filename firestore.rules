@@ -142,5 +142,10 @@ service cloud.firestore {
     match /aiUsageDaily/{entryId} {
       allow read, write: if false;
     }
+
+    // Server-only practice sets: answer keys live here until submission. Never readable by clients.
+    match /questionSets/{setId} {
+      allow read, write: if false;
+    }
   }
 }

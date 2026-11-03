@@ -1,0 +1,104 @@
+[
+  {
+    "id": "cur-phy-kin-0001",
+    "source": "curated",
+    "type": "mcq",
+    "subjectId": "physics",
+    "chapterId": "physics.kinematics",
+    "topicIds": ["physics.kinematics.uniformly-accelerated-motion"],
+    "difficulty": "easy",
+    "stem": "A ball is thrown vertically upward with a speed of $20\\,\\text{m s}^{-1}$. Taking $g = 10\\,\\text{m s}^{-2}$ and neglecting air resistance, what is the maximum height reached above the point of projection?",
+    "options": [
+      { "id": "A", "text": "$10\\,\\text{m}$" },
+      { "id": "B", "text": "$20\\,\\text{m}$" },
+      { "id": "C", "text": "$40\\,\\text{m}$" },
+      { "id": "D", "text": "$80\\,\\text{m}$" }
+    ],
+    "correctOptionIds": ["B"],
+    "explanation": "At the highest point $v = 0$. Using $v^2 = u^2 - 2gh$: $h = \\dfrac{u^2}{2g} = \\dfrac{20^2}{2 \\times 10} = 20\\,\\text{m}$.",
+    "curated": { "author": "Learnmate content team (draft)", "createdAt": "2026-11-03" },
+    "verification": { "status": "pending_review" }
+  },
+  {
+    "id": "cur-phy-um-0001",
+    "source": "curated",
+    "type": "numerical",
+    "subjectId": "physics",
+    "chapterId": "physics.units-measurements",
+    "topicIds": ["physics.units-measurements.dimensional-analysis"],
+    "difficulty": "easy",
+    "stem": "The dimensional formula of force is $[M^{a} L^{b} T^{c}]$. Find the value of $a + b + c$.",
+    "acceptedIntegers": [0],
+    "explanation": "Force = mass × acceleration, so $[F] = [M L T^{-2}]$. Hence $a = 1$, $b = 1$, $c = -2$ and $a + b + c = 0$.",
+    "curated": { "author": "Learnmate content team (draft)", "createdAt": "2026-11-03" },
+    "verification": { "status": "pending_review" }
+  },
+  {
+    "id": "cur-chem-mole-0001",
+    "source": "curated",
+    "type": "mcq",
+    "subjectId": "chemistry",
+    "chapterId": "chemistry.basic-concepts",
+    "topicIds": ["chemistry.basic-concepts.mole-concept"],
+    "difficulty": "easy",
+    "stem": "How many moles of carbon dioxide are present in $22\\,\\text{g}$ of $\\text{CO}_2$? (Molar mass of $\\text{CO}_2 = 44\\,\\text{g mol}^{-1}$)",
+    "options": [
+      { "id": "A", "text": "0.25" },
+      { "id": "B", "text": "0.5" },
+      { "id": "C", "text": "1" },
+      { "id": "D", "text": "2" }
+    ],
+    "correctOptionIds": ["B"],
+    "explanation": "Number of moles $= \\dfrac{\\text{mass}}{\\text{molar mass}} = \\dfrac{22}{44} = 0.5\\,\\text{mol}$.",
+    "curated": { "author": "Learnmate content team (draft)", "createdAt": "2026-11-03" },
+    "verification": { "status": "pending_review" }
+  },
+  {
+    "id": "cur-chem-atom-0001",
+    "source": "curated",
+    "type": "numerical",
+    "subjectId": "chemistry",
+    "chapterId": "chemistry.atomic-structure",
+    "topicIds": ["chemistry.atomic-structure.quantum-mechanical-model"],
+    "difficulty": "easy",
+    "stem": "What is the maximum number of electrons that can be accommodated in the shell with principal quantum number $n = 3$?",
+    "acceptedIntegers": [18],
+    "explanation": "A shell with principal quantum number $n$ holds at most $2n^2$ electrons. For $n = 3$: $2 \\times 3^2 = 18$.",
+    "curated": { "author": "Learnmate content team (draft)", "createdAt": "2026-11-03" },
+    "verification": { "status": "pending_review" }
+  },
+  {
+    "id": "cur-math-ap-0001",
+    "source": "curated",
+    "type": "mcq",
+    "subjectId": "mathematics",
+    "chapterId": "mathematics.sequence-series",
+    "topicIds": ["mathematics.sequence-series.arithmetic-progression"],
+    "difficulty": "easy",
+    "stem": "What is the sum of the first 20 natural numbers?",
+    "options": [
+      { "id": "A", "text": "190" },
+      { "id": "B", "text": "200" },
+      { "id": "C", "text": "210" },
+      { "id": "D", "text": "220" }
+    ],
+    "correctOptionIds": ["C"],
+    "explanation": "The natural numbers form an AP with first term 1 and common difference 1, so $S_n = \\dfrac{n(n+1)}{2} = \\dfrac{20 \\times 21}{2} = 210$.",
+    "curated": { "author": "Learnmate content team (draft)", "createdAt": "2026-11-03" },
+    "verification": { "status": "pending_review" }
+  },
+  {
+    "id": "cur-math-pnc-0001",
+    "source": "curated",
+    "type": "numerical",
+    "subjectId": "mathematics",
+    "chapterId": "mathematics.permutations-combinations",
+    "topicIds": ["mathematics.permutations-combinations.permutations-combinations"],
+    "difficulty": "easy",
+    "stem": "In how many ways can a committee of 2 students be chosen from a group of 5 students?",
+    "acceptedIntegers": [10],
+    "explanation": "The order of selection does not matter, so the number of ways is $\\binom{5}{2} = \\dfrac{5 \\times 4}{2} = 10$.",
+    "curated": { "author": "Learnmate content team (draft)", "createdAt": "2026-11-03" },
+    "verification": { "status": "pending_review" }
+  }
+]

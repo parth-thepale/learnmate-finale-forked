@@ -16,13 +16,13 @@ import {
 } from 'lucide-react';
 import {
   StudyDocument,
-  QuizQuestion,
+  PracticeQuizQuestion,
   QuizAttempt,
-  QuizAttemptAnswer,
   StudentAcademicProfile,
 } from '../types/study';
 import { studyStorage } from '../services/storageService';
-import { aiStudyClient } from '../services/aiClient';
+import { aiStudyClient, ApiRequestError } from '../services/aiClient';
+import { identifyWeakTopics, assessTopics } from '../utils/weakTopics';
 import { QuizProctorOverlay } from './QuizProctorOverlay';
 
 interface PracticeWorkspaceViewProps {
@@ -36,88 +36,6 @@ interface PracticeWorkspaceViewProps {
 
 type PracticeSourceMode = 'notes' | 'chapters' | 'past_papers';
 
-const CANONICAL_PROBABILITY_QUESTIONS: QuizQuestion[] = [
-  {
-    id: 'prob-q-1',
-    topic: 'Sample Spaces and Events',
-    question:
-      'In a random experiment of rolling a fair six-sided die once, what is the sample space S?',
-    options: [
-      'S = {1, 2, 3, 4, 5, 6}',
-      'S = {2, 4, 6}',
-      'S = {1, 6}',
-      'S = [0, 1]',
-    ],
-    correctIndex: 0,
-    explanation:
-      'The sample space S is the set of all possible outcomes of the experiment: S = {1, 2, 3, 4, 5, 6}.',
-    sourcePage: 1,
-    sourceQuote: 'The sample space S is the set of all possible outcomes in a probability experiment.',
-    difficulty: 'easy',
-  },
-  {
-    id: 'prob-q-2',
-    topic: 'Conditional Probability',
-    question:
-      'A card is drawn at random from a standard deck of 52 playing cards. Given that the card drawn is a spade, what is the probability that it is an ace?',
-    options: ['1/13', '1/4', '1/52', '4/13'],
-    correctIndex: 0,
-    explanation:
-      'Let A be "card is an ace" and B be "card is a spade". P(A ∩ B) = 1/52 and P(B) = 13/52, so P(A | B) = (1/52) / (13/52) = 1/13.',
-    sourcePage: 2,
-    sourceQuote: 'Then P(A | B) = P(A ∩ B) / P(B) = (1/52) / (13/52) = 1/13.',
-    difficulty: 'medium',
-  },
-  {
-    id: 'prob-q-3',
-    topic: 'Conditional Probability',
-    question:
-      'For two events A and B with P(B) > 0, which expression correctly defines the conditional probability P(A | B)?',
-    options: [
-      'P(A ∩ B) / P(B)',
-      'P(A ∪ B) / P(A)',
-      'P(A) · P(B)',
-      'P(B) / P(A ∩ B)',
-    ],
-    correctIndex: 0,
-    explanation:
-      'By definition, the conditional probability of A given B is P(A | B) = P(A ∩ B) / P(B) provided P(B) > 0.',
-    sourcePage: 2,
-    sourceQuote: 'P(A | B) = P(A ∩ B) / P(B), P(B) > 0.',
-    difficulty: 'easy',
-  },
-  {
-    id: 'prob-q-4',
-    topic: 'Bayes’ Theorem',
-    question:
-      'If P(A) = 1/3, P(B | A) = 3/4, and P(B) = 1/2, what is the posterior probability P(A | B) according to Bayes’ Theorem?',
-    options: ['1/2', '1/4', '2/3', '3/8'],
-    correctIndex: 0,
-    explanation:
-      'Using Bayes’ Theorem: P(A | B) = [P(B | A) · P(A)] / P(B) = [(3/4) · (1/3)] / (1/2) = (1/4) / (1/2) = 1/2.',
-    sourcePage: 3,
-    sourceQuote: 'Bayes Theorem updates prior probability P(A) using conditional likelihood P(B | A).',
-    difficulty: 'medium',
-  },
-  {
-    id: 'prob-q-5',
-    topic: 'Independent Events',
-    question:
-      'Two events A and B with positive probabilities are mutually exclusive (disjoint). Which statement is always true?',
-    options: [
-      'They cannot be independent because P(A ∩ B) = 0 ≠ P(A)P(B).',
-      'They are automatically independent.',
-      'P(A | B) = P(A)',
-      'P(A ∪ B) = P(A)P(B)',
-    ],
-    correctIndex: 0,
-    explanation:
-      'For disjoint events, P(A ∩ B) = 0. If P(A) > 0 and P(B) > 0, then P(A)P(B) > 0, so P(A ∩ B) ≠ P(A)P(B).',
-    sourcePage: 2,
-    sourceQuote: 'Disjoint events with positive probability are dependent.',
-    difficulty: 'hard',
-  },
-];
 
 /**
  * Renders option text with stacked mathematical fractions when the option is a simple fraction like "1/13"
@@ -158,8 +76,12 @@ export const PracticeWorkspaceView: React.FC<PracticeWorkspaceViewProps> = ({
   // Active Practice Session State (matching Image 9)
   const [sessionActive, setSessionActive] = useState<boolean>(false);
   const [isGenerating, setIsGenerating] = useState<boolean>(false);
-  const [questions, setQuestions] = useState<QuizQuestion[]>(CANONICAL_PROBABILITY_QUESTIONS);
-  const [currentIndex, setCurrentIndex] = useState<number>(1); // 0-indexed: default to Question 2 (Conditional Probability card drawing) or 0
+  const [questions, setQuestions] = useState<PracticeQuizQuestion[]>([]);
+  const [setId, setSetId] = useState<string | null>(null);
+  const [generateError, setGenerateError] = useState<string | null>(null);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState<string | null>(null);
+  const [currentIndex, setCurrentIndex] = useState<number>(0);
   const [selectedAnswers, setSelectedAnswers] = useState<Record<string, number>>({});
   const [savedForLaterIds, setSavedForLaterIds] = useState<Record<string, boolean>>({});
   const [submittedResult, setSubmittedResult] = useState<QuizAttempt | null>(null);
@@ -173,7 +95,7 @@ export const PracticeWorkspaceView: React.FC<PracticeWorkspaceViewProps> = ({
   useEffect(() => {
     if (!sessionActive || submittedResult || remainingSeconds === null) return;
     if (remainingSeconds <= 0) {
-      handleSubmitSession();
+      void handleSubmitSession();
       return;
     }
     const timer = window.setInterval(() => {
@@ -183,15 +105,7 @@ export const PracticeWorkspaceView: React.FC<PracticeWorkspaceViewProps> = ({
   }, [sessionActive, submittedResult, remainingSeconds]);
 
   const topicPills = useMemo(() => {
-    const base = [
-      'All',
-      'Sample Spaces',
-      'Events',
-      'Conditional Probability',
-      'Bayes’ Theorem',
-      'Random Variables',
-      'Distributions',
-    ];
+    const base = ['All'];
     if (currentDoc?.topics) {
       for (const t of currentDoc.topics) {
         if (!base.some((b) => b.toLowerCase() === t.name.toLowerCase())) {
@@ -202,20 +116,14 @@ export const PracticeWorkspaceView: React.FC<PracticeWorkspaceViewProps> = ({
     return base.slice(0, 8);
   }, [currentDoc]);
 
-  const handleStartPracticeSet = async (focusWeakTopic?: string) => {
-    try {
-      if (!document.fullscreenElement) {
-        document.documentElement.requestFullscreen().catch(() => {});
-      }
-    } catch {}
+  const handleStartPracticeSet = async (focusTopic?: string) => {
     setSubmittedResult(null);
-    const topicFilter = focusWeakTopic || (selectedTopicPill === 'All' ? undefined : selectedTopicPill);
-    const initialSet = CANONICAL_PROBABILITY_QUESTIONS.slice(0, Math.max(5, questionCount));
-    setQuestions(initialSet);
-    setCurrentIndex(initialSet.length > 1 ? 1 : 0);
-    setSelectedAnswers({
-      [initialSet[initialSet.length > 1 ? 1 : 0].id]: 0,
-    });
+    setSubmitError(null);
+    setGenerateError(null);
+    setQuestions([]);
+    setSetId(null);
+    setCurrentIndex(0);
+    setSelectedAnswers({});
     setSavedForLaterIds({});
     const mins =
       timeLimit === '10 min'
@@ -225,81 +133,87 @@ export const PracticeWorkspaceView: React.FC<PracticeWorkspaceViewProps> = ({
         : timeLimit === '30 min'
         ? 30
         : null;
-    setRemainingSeconds(mins ? mins * 60 : null);
+    setRemainingSeconds(null);
     setSessionActive(true);
 
+    if (!currentDoc || currentDoc.pages.length === 0) {
+      setGenerateError('Add study material first: practice questions are generated from your notes.');
+      return;
+    }
+
+    const topicFilter = focusTopic || (selectedTopicPill === 'All' ? undefined : selectedTopicPill);
+    setIsGenerating(true);
     try {
-      if (currentDoc && currentDoc.pages.length > 0) {
-        const res = await aiStudyClient.generateQuiz({
-          documentId: currentDoc.id,
-          title: currentDoc.title,
-          pages: currentDoc.pages,
-          topics: currentDoc.topics,
-          mode: topicFilter ? 'adaptive' : 'diagnostic',
-          focusTopics: topicFilter ? [topicFilter] : undefined,
-          questionCount,
-        });
-        if (res.questions && res.questions.length > 0) {
-          const combined = [
-            ...CANONICAL_PROBABILITY_QUESTIONS,
-            ...res.questions.filter(
-              (g) => !CANONICAL_PROBABILITY_QUESTIONS.some((c) => c.question === g.question)
-            ),
-          ].slice(0, Math.max(5, questionCount));
-          setQuestions(combined);
-        }
-      }
-    } catch {
-      // Keep canonical probability questions active
+      const res = await aiStudyClient.generateQuiz({
+        documentId: currentDoc.id,
+        title: currentDoc.title,
+        pages: currentDoc.pages,
+        topics: currentDoc.topics,
+        mode: topicFilter ? 'adaptive' : 'diagnostic',
+        focusTopics: topicFilter ? [topicFilter] : undefined,
+        questionCount,
+        forceRefresh: true,
+      });
+      setQuestions(res.questions);
+      setSetId(res.setId);
+      // The timer starts only once real questions are on screen.
+      setRemainingSeconds(mins ? mins * 60 : null);
+    } catch (err) {
+      setGenerateError(err instanceof Error ? err.message : 'Could not generate a practice set. Please try again.');
     } finally {
       setIsGenerating(false);
     }
   };
 
-  const handleSubmitSession = () => {
-    const answers: QuizAttemptAnswer[] = questions.map((q) => {
-      const selectedIdx = selectedAnswers[q.id] ?? -1;
-      const isCorrect = selectedIdx === q.correctIndex;
-      return {
-        questionId: q.id,
-        selectedIndex: selectedIdx,
-        isCorrect,
-        topic: q.topic,
-        sourcePage: q.sourcePage,
-      };
-    });
-
-    const correctCount = answers.filter((a) => a.isCorrect).length;
-    const weakSet = new Set<string>();
-    const strongSet = new Set<string>();
-    answers.forEach((a) => {
-      if (!a.isCorrect) weakSet.add(a.topic);
-      else strongSet.add(a.topic);
-    });
-
-    const newAttempt: QuizAttempt = {
-      id: `attempt-${Date.now()}`,
-      documentId: currentDoc?.id || 'doc-probability',
-      documentTitle: currentDoc?.title || 'Probability Notes.pdf',
-      mode: practiceMode === 'Exam Mode' ? 'adaptive' : 'diagnostic',
-      questions,
-      answers,
-      score: correctCount,
-      totalQuestions: questions.length,
-      percentage: Math.round((correctCount / Math.max(1, questions.length)) * 100),
-      weakTopics: Array.from(weakSet),
-      strongTopics: Array.from(strongSet),
-      completedAt: new Date().toISOString(),
-    };
-
-    studyStorage.saveQuizAttempt(newAttempt);
-    setAttempts(studyStorage.getQuizAttempts());
-    setSubmittedResult(newAttempt);
+  const handleSubmitSession = async () => {
+    if (!setId || questions.length === 0 || isSubmitting || submittedResult) return;
+    setIsSubmitting(true);
+    setSubmitError(null);
+    try {
+      // Graded on the server; correct answers are only revealed in the returned attempt.
+      const { attempt } = await aiStudyClient.submitPracticeSet({ setId, selectedIndices: selectedAnswers });
+      studyStorage.saveQuizAttempt(attempt);
+      setAttempts(studyStorage.getQuizAttempts());
+      setSubmittedResult(attempt);
+    } catch (err) {
+      if (err instanceof ApiRequestError && err.code === 'set_not_found') {
+        setGenerateError(err.message);
+        setQuestions([]);
+        setSetId(null);
+      } else {
+        setSubmitError(err instanceof Error ? err.message : 'Your answers could not be submitted. Please try again.');
+      }
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   // Render Active Question View matching Image 9 ("Check your understanding.")
+  if (sessionActive && questions.length === 0) {
+    return (
+      <div className="max-w-xl mx-auto py-16 text-center space-y-4" role={generateError ? 'alert' : 'status'}>
+        {isGenerating ? (
+          <p className="text-base text-[#606B7C]">Generating your practice set from {currentDoc?.title}…</p>
+        ) : (
+          <p className="text-base text-red-700">{generateError || 'No questions are available yet.'}</p>
+        )}
+        {!isGenerating && (
+          <button
+            type="button"
+            onClick={() => setSessionActive(false)}
+            className="px-5 py-2.5 rounded-lg border border-[#E8E6E2] bg-white text-xs font-semibold text-[#121827] cursor-pointer"
+          >
+            Back to Practice
+          </button>
+        )}
+      </div>
+    );
+  }
+
   if (sessionActive) {
     const activeQuestion = questions[currentIndex] || questions[0];
+    const reviewQuestion = submittedResult?.questions.find((q) => q.id === activeQuestion.id);
+    const correctOptionIndex = reviewQuestion ? reviewQuestion.correctIndex : -1;
     const progressPct = Math.round(((currentIndex + 1) / Math.max(1, questions.length)) * 100);
     const chosenOption = selectedAnswers[activeQuestion.id];
     const isSavedForLater = Boolean(savedForLaterIds[activeQuestion.id]);
@@ -310,8 +224,8 @@ export const PracticeWorkspaceView: React.FC<PracticeWorkspaceViewProps> = ({
         <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-3">
           <div className="space-y-1.5">
             <div className="lm-kicker">
-              MATHEMATICS &nbsp;/&nbsp;{' '}
-              {currentDoc ? currentDoc.title.replace(/\.pdf$/i, '').toUpperCase() : 'PROBABILITY'}
+              PRACTICE &nbsp;/&nbsp;{' '}
+              {currentDoc ? currentDoc.title.replace(/\.pdf$/i, '').toUpperCase() : 'PRACTICE'}
             </div>
             <h1 className="lm-editorial-title text-4xl sm:text-5xl">
               Check your understanding.
@@ -419,7 +333,7 @@ export const PracticeWorkspaceView: React.FC<PracticeWorkspaceViewProps> = ({
             {activeQuestion.options.map((optText, idx) => {
               const letter = ['A', 'B', 'C', 'D'][idx] || String(idx + 1);
               const isSelected = chosenOption === idx;
-              const isCorrect = activeQuestion.correctIndex === idx;
+              const isCorrect = correctOptionIndex === idx;
 
               let cardClasses =
                 'bg-white border-[#E8E6E2] hover:border-[#C84428]/50 text-[#121827]';
@@ -477,12 +391,13 @@ export const PracticeWorkspaceView: React.FC<PracticeWorkspaceViewProps> = ({
           </div>
 
           {/* Grounded Explanation Box when submitted */}
-          {submittedResult && (
+          {submittedResult && reviewQuestion && (
             <div className="p-4 rounded-xl bg-[#FCFBF9] border border-[#E8E6E2] space-y-1.5 text-xs">
               <div className="font-semibold text-[#C84428]">
-                Verified Solution (Source: Page {activeQuestion.sourcePage})
+                Explanation · AI-generated practice question
+                {reviewQuestion.sourcePage > 0 ? ` (from page ${reviewQuestion.sourcePage} of your notes)` : ''}
               </div>
-              <p className="text-[#121827] leading-relaxed">{activeQuestion.explanation}</p>
+              <p className="text-[#121827] leading-relaxed">{reviewQuestion.explanation}</p>
             </div>
           )}
 
@@ -525,15 +440,23 @@ export const PracticeWorkspaceView: React.FC<PracticeWorkspaceViewProps> = ({
                   <ChevronRight className="w-4 h-4" />
                 </button>
               ) : !submittedResult ? (
-                <button
-                  type="button"
-                  onClick={handleSubmitSession}
-                  data-testid="practice-submit-set-btn"
-                  className="inline-flex items-center gap-2 px-5 py-2.5 rounded-lg lm-btn-accent text-xs cursor-pointer"
-                >
-                  <span>Submit Practice Set</span>
-                  <ChevronRight className="w-4 h-4" />
-                </button>
+                <div className="flex flex-col items-end gap-1">
+                  <button
+                    type="button"
+                    onClick={() => void handleSubmitSession()}
+                    disabled={isSubmitting}
+                    data-testid="practice-submit-set-btn"
+                    className="inline-flex items-center gap-2 px-5 py-2.5 rounded-lg lm-btn-accent text-xs cursor-pointer disabled:opacity-60 disabled:cursor-wait"
+                  >
+                    <span>{isSubmitting ? 'Grading…' : 'Submit Practice Set'}</span>
+                    <ChevronRight className="w-4 h-4" />
+                  </button>
+                  {submitError && (
+                    <p role="alert" className="text-xs text-red-700 max-w-xs text-right">
+                      {submitError}
+                    </p>
+                  )}
+                </div>
               ) : null}
             </div>
           </div>
@@ -545,7 +468,7 @@ export const PracticeWorkspaceView: React.FC<PracticeWorkspaceViewProps> = ({
   // Default View: Practice Set Builder matching Image 10 ("Practice, with purpose.")
   const avgAccuracy =
     attempts.length === 0
-      ? 78
+      ? null
       : Math.round(
           attempts.reduce(
             (acc, a) => acc + (a.score / Math.max(1, a.totalQuestions)) * 100,
@@ -553,44 +476,32 @@ export const PracticeWorkspaceView: React.FC<PracticeWorkspaceViewProps> = ({
           ) / attempts.length
         );
 
-  const recentAttemptRows =
-    attempts.length > 0
-      ? attempts.slice(0, 4).map((att) => ({
-          id: att.id,
-          title: `${att.documentTitle.replace(/\.pdf$/i, '')}: Custom Set`,
-          meta: `${att.totalQuestions} questions · Mixed · ${new Date(
-            att.completedAt
-          ).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`,
-          pct: Math.round((att.score / Math.max(1, att.totalQuestions)) * 100),
-        }))
-      : [
-          {
-            id: 'sample-att-1',
-            title: 'Probability: Custom Set',
-            meta: '10 questions · Mixed · 18 mins · Yesterday',
-            pct: 80,
-          },
-          {
-            id: 'sample-att-2',
-            title: 'Conditional Probability & Bayes’ Theorem',
-            meta: '15 questions · Medium · 24 mins · 3 days ago',
-            pct: 73,
-          },
-          {
-            id: 'sample-att-3',
-            title: 'Sample Spaces and Events',
-            meta: '10 questions · Easy · 12 mins · 5 days ago',
-            pct: 90,
-          },
-        ];
+  const recentAttemptRows = attempts.slice(0, 4).map((att) => ({
+    id: att.id,
+    title: att.documentTitle.replace(/\.pdf$/i, ''),
+    meta: `${att.totalQuestions} questions · ${new Date(att.completedAt).toLocaleDateString('en-US', {
+      month: 'short',
+      day: 'numeric',
+    })}`,
+    pct: Math.round((att.score / Math.max(1, att.totalQuestions)) * 100),
+  }));
+
+  // Oldest → newest, last 5 attempts, for the real progress line.
+  const trendPoints = attempts
+    .slice(0, 5)
+    .reverse()
+    .map((att) => Math.round((att.score / Math.max(1, att.totalQuestions)) * 100));
+
+  const weakTopicEvidence = identifyWeakTopics(attempts);
+  const topicsAwaitingEvidence = assessTopics(attempts).filter((t) => t.status === 'insufficient_evidence').length;
 
   return (
     <div className="space-y-7 pb-12">
       {/* Editorial Header matching Image 10 */}
       <div className="space-y-2 max-w-2xl">
         <div className="lm-kicker">
-          MATHEMATICS &nbsp;/&nbsp;{' '}
-          {currentDoc ? currentDoc.title.replace(/\.pdf$/i, '').toUpperCase() : 'PROBABILITY'}
+          PRACTICE &nbsp;/&nbsp;{' '}
+          {currentDoc ? currentDoc.title.replace(/\.pdf$/i, '').toUpperCase() : 'PRACTICE'}
         </div>
         <h1 className="lm-editorial-title text-4xl sm:text-5xl">
           Practice, with purpose.
@@ -620,20 +531,23 @@ export const PracticeWorkspaceView: React.FC<PracticeWorkspaceViewProps> = ({
                     title: 'My Notes',
                     subtitle: currentDoc
                       ? `${currentDoc.title} (${currentDoc.pages.length} pages)`
-                      : 'Probability Notes.pdf (4 pages)',
+                      : 'No study material yet',
                     icon: FileText,
+                    available: true,
                   },
                   {
                     id: 'chapters' as PracticeSourceMode,
                     title: 'Chapters',
-                    subtitle: 'Class 12 · Probability',
+                    subtitle: 'Not available yet',
                     icon: BookOpen,
+                    available: false,
                   },
                   {
                     id: 'past_papers' as PracticeSourceMode,
                     title: 'Past Papers',
-                    subtitle: 'JEE Main & Board Questions',
+                    subtitle: 'Not available yet',
                     icon: ClipboardCheck,
+                    available: false,
                   },
                 ].map((src) => {
                   const Icon = src.icon;
@@ -642,7 +556,9 @@ export const PracticeWorkspaceView: React.FC<PracticeWorkspaceViewProps> = ({
                     <button
                       key={src.id}
                       type="button"
-                      onClick={() => setSourceMode(src.id)}
+                      disabled={!src.available}
+                      aria-disabled={!src.available}
+                      onClick={() => src.available && setSourceMode(src.id)}
                       className={`p-4 rounded-xl border text-left transition-all cursor-pointer flex flex-col justify-between gap-2 ${
                         selected
                           ? 'bg-[#FCF8F6] border-[#C84428] ring-1 ring-[#C84428]/25'
@@ -853,15 +769,11 @@ export const PracticeWorkspaceView: React.FC<PracticeWorkspaceViewProps> = ({
               <h2 className="font-serif-editorial text-lg font-bold text-[#121827]">
                 Recent Attempts
               </h2>
-              <button
-                type="button"
-                onClick={() => void handleStartPracticeSet()}
-                className="inline-flex items-center gap-1 text-xs font-medium text-[#C84428] hover:underline cursor-pointer"
-              >
-                <span>View all</span>
-                <ChevronRight className="w-3.5 h-3.5" />
-              </button>
             </div>
+
+            {recentAttemptRows.length === 0 && (
+              <p className="text-xs text-[#606B7C]">No practice attempts yet. Your results will appear here.</p>
+            )}
 
             <div className="divide-y divide-[#F2F0EC]">
               {recentAttemptRows.map((row) => (
@@ -877,17 +789,9 @@ export const PracticeWorkspaceView: React.FC<PracticeWorkspaceViewProps> = ({
                   </div>
 
                   <div className="flex items-center gap-3 shrink-0">
-                    <span className="px-2.5 py-1 rounded-md bg-[#E2F5EA] text-[#2E7D52] font-bold text-xs tabular-nums">
+                    <span className="px-2.5 py-1 rounded-md bg-[#F2F0EC] text-[#121827] font-bold text-xs tabular-nums">
                       {row.pct}%
                     </span>
-                    <button
-                      type="button"
-                      onClick={() => void handleStartPracticeSet()}
-                      className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg border border-[#E8E6E2] bg-white hover:bg-[#FCFBF9] text-xs font-medium text-[#121827] cursor-pointer"
-                    >
-                      <span>Review</span>
-                      <ChevronDown className="w-3 h-3 text-[#606B7C]" />
-                    </button>
                   </div>
                 </div>
               ))}
@@ -905,83 +809,48 @@ export const PracticeWorkspaceView: React.FC<PracticeWorkspaceViewProps> = ({
 
             <div className="flex items-baseline gap-2">
               <span className="font-serif-editorial font-bold text-3xl text-[#121827] tabular-nums">
-                {avgAccuracy}%
+                {avgAccuracy === null ? '—' : `${avgAccuracy}%`}
               </span>
-              <span className="text-xs text-[#606B7C]">Avg. Accuracy</span>
-              <span className="text-xs font-semibold text-[#2E7D52] ml-auto">
-                +8% this week
+              <span className="text-xs text-[#606B7C]">
+                {avgAccuracy === null ? 'No attempts yet' : `Avg. accuracy over ${attempts.length} attempt${attempts.length === 1 ? '' : 's'}`}
               </span>
             </div>
 
-            {/* Smooth Editorial SVG Trend Line */}
-            <div className="pt-2">
-              <svg viewBox="0 0 280 120" className="w-full h-28 overflow-visible">
-                <defs>
-                  <linearGradient id="practiceAreaGrad" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="0%" stopColor="#C84428" stopOpacity="0.18" />
-                    <stop offset="100%" stopColor="#C84428" stopOpacity="0.0" />
-                  </linearGradient>
-                </defs>
-                {[25, 55, 85].map((y) => (
-                  <line
-                    key={y}
-                    x1="24"
-                    y1={y}
-                    x2="268"
-                    y2={y}
-                    stroke="#F2F0EC"
-                    strokeWidth="1"
+            {trendPoints.length >= 2 ? (
+              <div className="pt-2">
+                <svg viewBox="0 0 280 120" className="w-full h-28 overflow-visible" role="img" aria-label="Accuracy in your recent practice attempts">
+                  {[0, 50, 100].map((pct) => (
+                    <g key={pct}>
+                      <line x1="28" y1={100 - pct * 0.8} x2="268" y2={100 - pct * 0.8} stroke="#F2F0EC" strokeWidth="1" />
+                      <text x="0" y={103 - pct * 0.8} fontSize="9" fill="#7B8494">
+                        {pct}%
+                      </text>
+                    </g>
+                  ))}
+                  <polyline
+                    fill="none"
+                    stroke="#C84428"
+                    strokeWidth="2.2"
+                    points={trendPoints
+                      .map((pct, i) => `${32 + (i * 224) / Math.max(1, trendPoints.length - 1)},${100 - pct * 0.8}`)
+                      .join(' ')}
                   />
-                ))}
-                <text x="0" y="28" fontSize="9" fill="#7B8494">
-                  90%
-                </text>
-                <text x="0" y="58" fontSize="9" fill="#7B8494">
-                  75%
-                </text>
-                <text x="0" y="88" fontSize="9" fill="#7B8494">
-                  60%
-                </text>
-
-                <path
-                  d="M 32 76 L 88 64 L 144 48 L 200 52 L 256 30 L 256 96 L 32 96 Z"
-                  fill="url(#practiceAreaGrad)"
-                />
-                <polyline
-                  fill="none"
-                  stroke="#C84428"
-                  strokeWidth="2.2"
-                  points="32,76 88,64 144,48 200,52 256,30"
-                />
-                {[
-                  { x: 32, y: 76, label: 'Set 1' },
-                  { x: 88, y: 64, label: 'Set 2' },
-                  { x: 144, y: 48, label: 'Set 3' },
-                  { x: 200, y: 52, label: 'Set 4' },
-                  { x: 256, y: 30, label: 'Set 5' },
-                ].map((pt, i) => (
-                  <g key={i}>
+                  {trendPoints.map((pct, i) => (
                     <circle
-                      cx={pt.x}
-                      cy={pt.y}
+                      key={i}
+                      cx={32 + (i * 224) / Math.max(1, trendPoints.length - 1)}
+                      cy={100 - pct * 0.8}
                       r="3.5"
                       fill="#FFFFFF"
                       stroke="#C84428"
                       strokeWidth="2"
                     />
-                    <text
-                      x={pt.x}
-                      y="112"
-                      textAnchor="middle"
-                      fontSize="9"
-                      fill="#7B8494"
-                    >
-                      {pt.label}
-                    </text>
-                  </g>
-                ))}
-              </svg>
-            </div>
+                  ))}
+                </svg>
+              </div>
+            ) : (
+              <p className="text-xs text-[#606B7C]">Complete at least two practice sets to see your trend.</p>
+            )}
           </div>
 
           {/* Focus on these topics Card matching Image 10 */}
@@ -995,36 +864,44 @@ export const PracticeWorkspaceView: React.FC<PracticeWorkspaceViewProps> = ({
               </p>
             </div>
 
-            <div className="space-y-3.5 pt-1">
-              {[
-                { name: 'Bayes’ Theorem', pct: 62 },
-                { name: 'Random Variables', pct: 68 },
-              ].map((wt) => (
-                <div key={wt.name} className="space-y-1.5">
-                  <div className="flex items-center justify-between text-xs">
-                    <span className="font-medium text-[#121827] flex items-center gap-2">
-                      <span className="w-2 h-2 rounded-full bg-[#C84428]" />
-                      {wt.name}
-                    </span>
-                    <span className="font-bold text-[#C84428] tabular-nums">{wt.pct}%</span>
-                  </div>
-                  <div className="w-full h-1.5 rounded-full bg-[#F2EAE4] overflow-hidden">
-                    <div
-                      className="h-full rounded-full bg-[#C84428]"
-                      style={{ width: `${wt.pct}%` }}
-                    />
-                  </div>
-                </div>
-              ))}
-            </div>
+            {weakTopicEvidence.length > 0 ? (
+              <div className="space-y-3.5 pt-1">
+                {weakTopicEvidence.slice(0, 3).map((wt) => {
+                  const pct = Math.round(wt.accuracy * 100);
+                  return (
+                    <div key={wt.key} className="space-y-1.5">
+                      <div className="flex items-center justify-between text-xs">
+                        <span className="font-medium text-[#121827] flex items-center gap-2">
+                          <span className="w-2 h-2 rounded-full bg-[#C84428]" />
+                          {wt.label}
+                        </span>
+                        <span className="font-bold text-[#C84428] tabular-nums">{pct}%</span>
+                      </div>
+                      <div className="w-full h-1.5 rounded-full bg-[#F2EAE4] overflow-hidden">
+                        <div className="h-full rounded-full bg-[#C84428]" style={{ width: `${pct}%` }} />
+                      </div>
+                      <p className="text-[11px] text-[#606B7C]">{wt.reason}</p>
+                    </div>
+                  );
+                })}
+              </div>
+            ) : (
+              <p className="text-xs text-[#606B7C] pt-1">
+                {topicsAwaitingEvidence > 0
+                  ? `Not enough practice yet to identify weak topics (${topicsAwaitingEvidence} topic${topicsAwaitingEvidence === 1 ? '' : 's'} need more questions across at least two attempts).`
+                  : 'Practise a few sets and Learnmate will point out topics that need work.'}
+              </p>
+            )}
 
-            <button
-              type="button"
-              onClick={() => void handleStartPracticeSet('Bayes’ Theorem')}
-              className="w-full py-2.5 px-4 rounded-lg border border-[#E8E6E2] bg-[#FCFBF9] hover:bg-[#FBECE6] hover:text-[#C84428] text-xs font-semibold text-[#121827] transition-colors cursor-pointer"
-            >
-              Practice Weak Topics
-            </button>
+            {weakTopicEvidence.length > 0 && (
+              <button
+                type="button"
+                onClick={() => void handleStartPracticeSet(weakTopicEvidence[0].label)}
+                className="w-full py-2.5 px-4 rounded-lg border border-[#E8E6E2] bg-[#FCFBF9] hover:bg-[#FBECE6] hover:text-[#C84428] text-xs font-semibold text-[#121827] transition-colors cursor-pointer"
+              >
+                Practise {weakTopicEvidence[0].label}
+              </button>
+            )}
           </div>
         </div>
       </div>
@@ -1032,7 +909,7 @@ export const PracticeWorkspaceView: React.FC<PracticeWorkspaceViewProps> = ({
       {/* Proctored Fullscreen Enforcement with 3 Warnings */}
       <QuizProctorOverlay
         isQuizActive={sessionActive && !submittedResult && questions.length > 0}
-        onAutoSubmit={handleSubmitSession}
+        onAutoSubmit={() => void handleSubmitSession()}
         quizTitle="Timed Practice Set"
       />
     </div>

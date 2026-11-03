@@ -62,6 +62,8 @@ function buildApp(opts: BuildOptions = {}) {
   app.post('/api/study/ask', echo('ask'));
   app.post('/api/study/quiz', echo('quiz'));
   app.post('/api/study/scan-notes', echo('scan'));
+  app.post('/api/practice/submit', echo('submit'));
+  app.post('/api/study/mistakes-and-plan', echo('mistakes'));
   app.post('/api/create/3d-model', echo('3d'));
   app.post('/api/create/lofi-music', echo('lofi'));
   app.post('/api/explore/daily-news', echo('news'));
@@ -281,5 +283,24 @@ test('quota store failure fails closed with 503 and never reaches the AI handler
     assert.equal(body.code, 'quota_unavailable');
     assert.ok(!JSON.stringify(body).includes('credentials'), 'internal reason must not leak');
     assert.deepEqual(handlerHits, []);
+  });
+});
+
+test('practice submission and mistake analysis require sign-in and a valid set id, and cost no AI quota', async () => {
+  const quotaStore = new MemoryDailyQuotaStore();
+  const { app, handlerHits } = buildApp({ quotaStore, dailyUnitLimit: 1 });
+  const setId = 'qs_' + 'a'.repeat(32);
+  await withTestServer(app, async (base) => {
+    assert.equal((await post(base, '/api/practice/submit', { setId, responses: {} })).status, 401);
+    assert.equal((await post(base, '/api/practice/submit', { setId: 'qs_bad', responses: {} }, 'uid:alice')).status, 400);
+    assert.equal((await post(base, '/api/practice/submit', { setId, responses: { q1: 'A' } }, 'uid:alice')).status, 400);
+    for (let i = 0; i < 3; i++) {
+      assert.equal((await post(base, '/api/practice/submit', { setId, responses: {} }, 'uid:alice')).status, 200);
+    }
+    // Mistake analysis no longer accepts client-graded attempts; it needs the server-held set.
+    const legacy = await post(base, '/api/study/mistakes-and-plan', { pages, attempt: { questions: [], answers: [] } }, 'uid:alice');
+    assert.equal(legacy.status, 400);
+    assert.equal((await post(base, '/api/study/mistakes-and-plan', { setId, pages }, 'uid:alice')).status, 200);
+    assert.deepEqual(handlerHits, ['submit', 'submit', 'submit', 'mistakes']);
   });
 });

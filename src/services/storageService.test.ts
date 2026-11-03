@@ -354,3 +354,23 @@ test('running out of local storage is surfaced instead of silently ignored', asy
   assert.deepEqual(repo.getDocuments(), []);
   assert.ok(repo.getSyncSnapshot().lastError?.includes('storage space'));
 });
+
+test('legacy cached quizzes (with answer keys) and expired practice sets are not reused', async () => {
+  const storage = new MemoryStorage();
+  const { repo } = makeRepo(storage);
+  repo.activateAccount(null);
+  storage.setItem(
+    scopedKey('guest', `${STORAGE_KEYS.QUIZ_CACHE_PREFIX}doc-1_diagnostic`),
+    JSON.stringify([{ id: 'q1', correctIndex: 2, options: ['a', 'b', 'c', 'd'] }])
+  );
+  assert.equal(repo.getCachedQuiz('doc-1', 'diagnostic'), null);
+
+  const question = { id: 'q1', source: 'ai' as const, topic: 't', question: 'q?', options: ['a', 'b', 'c', 'd'] as [string, string, string, string], sourcePage: 1, difficulty: 'easy' as const };
+  repo.saveCachedQuiz('doc-1', 'diagnostic', { setId: 'qs_1', questions: [question], createdAt: '2026-11-03T00:00:00Z', expiresAt: '2000-01-01T00:00:00Z' });
+  assert.equal(repo.getCachedQuiz('doc-1', 'diagnostic'), null, 'expired set');
+  const future = new Date(Date.now() + 3600_000).toISOString();
+  repo.saveCachedQuiz('doc-1', 'diagnostic', { setId: 'qs_2', questions: [question], createdAt: '2026-11-03T00:00:00Z', expiresAt: future });
+  assert.equal(repo.getCachedQuiz('doc-1', 'diagnostic')?.setId, 'qs_2');
+  repo.clearCachedQuiz('doc-1', 'diagnostic');
+  assert.equal(repo.getCachedQuiz('doc-1', 'diagnostic'), null);
+});

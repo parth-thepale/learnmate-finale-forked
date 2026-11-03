@@ -45,6 +45,8 @@ export const API_ROUTE_POLICIES: readonly ApiRoutePolicy[] = Object.freeze([
     validator: 'mistakesAndPlan',
     bodyLimit: 'default',
   },
+  // Server-side grading of a stored practice set (no AI call).
+  { id: 'practice.submit', method: 'POST', path: '/api/practice/submit', aiUnits: 0, validator: 'practiceSubmit', bodyLimit: 'default' },
   { id: 'study.quickRevise', method: 'POST', path: '/api/study/quick-revise', aiUnits: 2, validator: 'quickRevise', bodyLimit: 'default' },
   {
     id: 'study.youtubeAnalyze',

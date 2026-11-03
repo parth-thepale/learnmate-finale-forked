@@ -2,7 +2,7 @@ import type { User } from 'firebase/auth';
 import type {
   StudyDocument,
   TutorMessage,
-  QuizQuestion,
+  CachedPracticeSet,
   QuizAttempt,
   MistakeInsight,
   RevisionTask,
@@ -70,8 +70,10 @@ export interface IStudyStorageRepository {
   getTutorMessages(documentId: string): TutorMessage[];
   saveTutorMessages(documentId: string, messages: TutorMessage[]): void;
 
-  getCachedQuiz(documentId: string, mode: string): QuizQuestion[] | null;
-  saveCachedQuiz(documentId: string, mode: string, questions: QuizQuestion[]): void;
+  /** Unsubmitted server-held practice set for a document, or null (expired/legacy entries are ignored). */
+  getCachedQuiz(documentId: string, mode: string): CachedPracticeSet | null;
+  saveCachedQuiz(documentId: string, mode: string, set: CachedPracticeSet): void;
+  clearCachedQuiz(documentId: string, mode: string): void;
 
   getQuizAttempts(documentId?: string): QuizAttempt[];
   saveQuizAttempt(attempt: QuizAttempt): void;
@@ -248,6 +250,22 @@ export function legacyMigrationTransform(
     // Unparseable legacy values are moved unchanged rather than dropped.
   }
   return value;
+}
+
+/**
+ * Cached practice sets reference a server-held set (with answer keys kept on the server).
+ * Legacy caches (arrays of questions with answers) and expired sets are ignored.
+ */
+export function isUsableCachedPracticeSet(value: unknown, now: Date = new Date()): value is CachedPracticeSet {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const set = value as Partial<CachedPracticeSet>;
+  return (
+    typeof set.setId === 'string' &&
+    Array.isArray(set.questions) &&
+    set.questions.length > 0 &&
+    typeof set.expiresAt === 'string' &&
+    new Date(set.expiresAt).getTime() > now.getTime()
+  );
 }
 
 function browserStorage(): KeyValueStorage | null {
@@ -567,7 +585,7 @@ export class HybridCloudStudyRepository implements IStudyStorageRepository {
       tutorMessages: this.getTutorMessages(documentId),
       mistakes: this.getMistakeInsights(documentId),
       revisionPlan: this.getRevisionPlan(documentId),
-      cachedQuiz: this.getCachedQuiz(documentId, 'diagnostic') || [],
+      cachedQuiz: this.getCachedQuiz(documentId, 'diagnostic'),
       quickRevise: this.getQuickReviseBundle(documentId),
     };
   }
@@ -648,7 +666,7 @@ export class HybridCloudStudyRepository implements IStudyStorageRepository {
       state.tutorMessages.length === 0 &&
       state.mistakes.length === 0 &&
       state.revisionPlan.length === 0 &&
-      state.cachedQuiz.length === 0 &&
+      !state.cachedQuiz &&
       !state.quickRevise
     );
   }
@@ -784,7 +802,7 @@ export class HybridCloudStudyRepository implements IStudyStorageRepository {
           local.tutorMessages.length > 0 ||
           local.mistakes.length > 0 ||
           local.revisionPlan.length > 0 ||
-          local.cachedQuiz.length > 0 ||
+          Boolean(local.cachedQuiz) ||
           Boolean(local.quickRevise);
         if (!stateData) {
           if (localHasState) void this.persistStudyStateToCloud(studyDoc.id);
@@ -799,7 +817,7 @@ export class HybridCloudStudyRepository implements IStudyStorageRepository {
             this.write(`${KEYS.MISTAKES_PREFIX}${studyDoc.id}`, remote.mistakes);
           if (local.revisionPlan.length === 0 && remote.revisionPlan.length > 0)
             this.write(`${KEYS.REVISION_PREFIX}${studyDoc.id}`, remote.revisionPlan);
-          if (local.cachedQuiz.length === 0 && remote.cachedQuiz.length > 0)
+          if (!local.cachedQuiz && remote.cachedQuiz)
             this.write(`${KEYS.QUIZ_CACHE_PREFIX}${studyDoc.id}_diagnostic`, remote.cachedQuiz);
           if (!local.quickRevise && remote.quickRevise && remote.quickRevise.documentId)
             this.write(`${KEYS.QUICK_REVISE_PREFIX}${studyDoc.id}`, remote.quickRevise);
@@ -1004,15 +1022,18 @@ export class HybridCloudStudyRepository implements IStudyStorageRepository {
     void this.persistStudyStateToCloud(documentId);
   }
 
-  getCachedQuiz(documentId: string, mode: string): QuizQuestion[] | null {
-    return this.read<QuizQuestion[] | null>(
-      `${KEYS.QUIZ_CACHE_PREFIX}${documentId}_${mode}`,
-      null
-    );
+  getCachedQuiz(documentId: string, mode: string): CachedPracticeSet | null {
+    const cached = this.read<unknown>(`${KEYS.QUIZ_CACHE_PREFIX}${documentId}_${mode}`, null);
+    return isUsableCachedPracticeSet(cached) ? cached : null;
   }
 
-  saveCachedQuiz(documentId: string, mode: string, questions: QuizQuestion[]): void {
-    this.write(`${KEYS.QUIZ_CACHE_PREFIX}${documentId}_${mode}`, questions);
+  saveCachedQuiz(documentId: string, mode: string, set: CachedPracticeSet): void {
+    this.write(`${KEYS.QUIZ_CACHE_PREFIX}${documentId}_${mode}`, set);
+    void this.persistStudyStateToCloud(documentId);
+  }
+
+  clearCachedQuiz(documentId: string, mode: string): void {
+    this.removeKey(`${KEYS.QUIZ_CACHE_PREFIX}${documentId}_${mode}`);
     void this.persistStudyStateToCloud(documentId);
   }
 

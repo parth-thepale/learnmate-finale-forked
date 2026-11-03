@@ -191,35 +191,30 @@ const validateQuiz: BodyValidator = (b) => {
   );
 };
 
-const validateMistakesAndPlan: BodyValidator = (b) => {
-  const base = all(
+const SET_ID_PATTERN = /^qs_[a-f0-9]{32}$/;
+
+function requireSetId(b: Record<string, unknown>): ValidationResult {
+  return typeof b.setId === 'string' && SET_ID_PATTERN.test(b.setId) ? OK : fail('A valid practice set id is required.');
+}
+
+const validateMistakesAndPlan: BodyValidator = (b) =>
+  all(
+    requireSetId(b),
     optionalString(b, 'documentId', 200),
     optionalString(b, 'title', REQUEST_LIMITS.maxTitleChars),
     validatePages(b.pages, true)
   );
+
+const validatePracticeSubmit: BodyValidator = (b) => {
+  const base = requireSetId(b);
   if (!base.ok) return base;
-  if (!isPlainObject(b.attempt)) return fail('Quiz attempt data is required.');
-  const { questions, answers } = b.attempt;
-  if (!Array.isArray(questions) || !Array.isArray(answers)) return fail('Quiz attempt data is malformed.');
-  if (questions.length > REQUEST_LIMITS.maxQuizQuestions || answers.length > REQUEST_LIMITS.maxQuizQuestions) {
-    return fail('Too many quiz questions in one attempt.', 413);
-  }
-  for (const q of questions) {
-    if (!isPlainObject(q) || typeof q.id !== 'string' || !Array.isArray(q.options) || q.options.length > 4) {
-      return fail('Quiz questions are malformed.');
-    }
-    for (const key of ['id', 'topic', 'question', 'explanation', 'sourceQuote']) {
-      const r = optionalString(q, key, REQUEST_LIMITS.maxQuizTextChars);
-      if (!r.ok) return r;
-    }
-    const opts = optionalStringList(q, 'options', 4, REQUEST_LIMITS.maxQuizTextChars);
-    if (!opts.ok) return opts;
-    if (!isIntInRange(q.correctIndex, 0, 3)) return fail('Quiz questions need a valid correct answer.');
-  }
-  for (const a of answers) {
-    if (!isPlainObject(a) || typeof a.questionId !== 'string' || !isIntInRange(a.selectedIndex, -1, 3)) {
-      return fail('Quiz answers are malformed.');
-    }
+  if (b.responses === undefined || b.responses === null) return OK;
+  if (!isPlainObject(b.responses)) return fail('"responses" must be an object.');
+  const entries = Object.entries(b.responses);
+  if (entries.length > REQUEST_LIMITS.maxQuizQuestions) return fail('Too many answers in one submission.', 413);
+  for (const [questionId, response] of entries) {
+    if (questionId.length > 80) return fail('Answer ids are malformed.');
+    if (!isPlainObject(response)) return fail('Answers are malformed.');
   }
   return OK;
 };
@@ -291,6 +286,7 @@ export const BODY_VALIDATORS = Object.freeze({
   ask: validateAsk,
   quiz: validateQuiz,
   mistakesAndPlan: validateMistakesAndPlan,
+  practiceSubmit: validatePracticeSubmit,
   quickRevise: validateQuickRevise,
   youtubeAnalyze: validateYouTubeAnalyze,
   scanNotes: validateScanNotes,

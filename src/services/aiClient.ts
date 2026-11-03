@@ -6,7 +6,7 @@ import type {
   TutorSourceType,
   GeminiModelOption,
   StudentTutorContext,
-  QuizQuestion,
+  PracticeQuizQuestion,
   QuizAttempt,
   MistakeInsight,
   RevisionTask,
@@ -54,8 +54,18 @@ export interface AskTutorResponse extends AiStatusMetadata {
   modelUsed?: string;
 }
 
-export interface GenerateQuizResponse extends AiStatusMetadata {
-  questions: QuizQuestion[];
+export interface GenerateQuizResponse {
+  setId: string;
+  expiresAt: string;
+  source: 'ai';
+  requestedCount: number;
+  rejectedCount: number;
+  questions: PracticeQuizQuestion[];
+}
+
+export interface SubmitPracticeResponse {
+  attempt: QuizAttempt;
+  alreadySubmitted: boolean;
 }
 
 export interface DiagnoseMistakesResponse extends AiStatusMetadata {
@@ -271,11 +281,23 @@ export const aiStudyClient = {
     return postJson<GenerateQuizResponse>('/api/study/quiz', params);
   },
 
+  /** Answers are graded on the server; `selectedIndices` maps question id to option index (-1 = unanswered). */
+  async submitPracticeSet(params: {
+    setId: string;
+    selectedIndices: Record<string, number>;
+  }): Promise<SubmitPracticeResponse> {
+    const optionIds = ['A', 'B', 'C', 'D'] as const;
+    const responses: Record<string, { type: 'mcq'; optionId: (typeof optionIds)[number] | null }> = {};
+    for (const [questionId, index] of Object.entries(params.selectedIndices)) {
+      responses[questionId] = { type: 'mcq', optionId: index >= 0 && index <= 3 ? optionIds[index] : null };
+    }
+    return postJson<SubmitPracticeResponse>('/api/practice/submit', { setId: params.setId, responses });
+  },
+
   async analyzeMistakesAndPlan(params: {
-    documentId: string;
+    setId: string;
     title: string;
     pages: StudyPage[];
-    attempt: QuizAttempt;
   }): Promise<DiagnoseMistakesResponse> {
     return postJson<DiagnoseMistakesResponse>('/api/study/mistakes-and-plan', params);
   },

@@ -60,9 +60,28 @@ import {
 import { QuotaUnavailableError, type DailyQuotaStore } from './src/server/quotaStore.ts';
 import { FixedWindowRateLimiter } from './src/server/rateLimiter.ts';
 import { REQUEST_LIMITS } from './src/server/requestValidation.ts';
+import { newQuestionSetId, type StoredQuestionSet } from './src/server/questionSetStore.ts';
+import {
+  validateGeneratedMcqSet,
+  type GeneratedMcqInput,
+  type ValidatedGeneratedMcq,
+} from './src/utils/questionValidation.ts';
+import {
+  collectMistakeInputs,
+  createAiPracticeSet,
+  gradeSubmission,
+  toPublicPracticeQuestion,
+} from './src/server/practiceService.ts';
+import { loadVerifiedQuestionBank } from './src/server/questionBankLoader.ts';
+import { canOfferFullLengthMock } from './src/utils/questionBank.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
+const MIN_PRACTICE_QUESTIONS = 5;
+const MISCONCEPTION_UNAVAILABLE =
+  'A detailed misconception analysis is not available for this question right now. Compare your answer with the explanation below.';
+
 
 function readPositiveIntEnv(name: string, fallback: number): number {
   const raw = process.env[name];
@@ -498,6 +517,8 @@ async function generateStructuredJson<T>(params: {
   responseSchema: Record<string, unknown>;
   preferredModel?: string;
   bypassCache?: boolean;
+  /** Throws to reject a structurally valid but unusable result; rejected results are never cached. */
+  validate?: (data: T) => void;
 }): Promise<{ data: T; modelUsed: string; providerUsed?: AiBackendProvider }> {
   const { ai: primaryAi, provider: primaryProvider } = await getTrialEligibleStudyClient();
   const fallbackDevAi = primaryProvider === 'vertex_ai' ? getDeveloperGenAIClient() : null;
@@ -563,8 +584,10 @@ async function generateStructuredJson<T>(params: {
             if (!rawText) {
               throw new Error('EMPTY_RESPONSE');
             }
+            const data = JSON.parse(rawText) as T;
+            params.validate?.(data);
             return {
-              data: JSON.parse(rawText) as T,
+              data,
               modelUsed: modelName,
               providerUsed: provider,
             };
@@ -884,148 +907,6 @@ function buildHybridTutorFallbackAnswer(
   };
 }
 
-function buildGroundedFallbackQuiz(
-  pages: PageInput[],
-  topics: TopicInput[],
-  mode: 'diagnostic' | 'adaptive',
-  focusTopics?: string[],
-  questionCount = 6
-) {
-  const validPageSet = new Set(pages.map((p) => p.pageNumber));
-  const targetCount = Math.max(5, Math.min(30, questionCount));
-
-  let candidatePages = pages;
-  if (mode === 'adaptive' && focusTopics && focusTopics.length > 0) {
-    const matched = pages.filter((p) =>
-      focusTopics.some(
-        (ft) =>
-          p.title.toLowerCase().includes(ft.toLowerCase()) ||
-          p.content.toLowerCase().includes(ft.toLowerCase())
-      )
-    );
-    if (matched.length > 0) candidatePages = matched;
-  }
-
-  const perPageStatements: Array<
-    Array<{
-      pageNumber: number;
-      topic: string;
-      fact: string;
-      term: string;
-    }>
-  > = [];
-
-  for (const page of candidatePages) {
-    const matchedTopic =
-      topics.find((t) => t.sourcePages.includes(page.pageNumber))?.name ||
-      (focusTopics && focusTopics[0]) ||
-      page.title ||
-      `Page ${page.pageNumber} Concepts`;
-
-    const lines = page.content
-      .split('\n')
-      .map((l) => l.replace(/^[•\-*\d.)\s]+/, '').trim())
-      .filter((l) => l.length >= 35 && l.length <= 210);
-
-    const pageItems = lines.map((line) => {
-      const colonParts = line.split(':');
-      const term =
-        colonParts.length > 1 && colonParts[0].length <= 45
-          ? colonParts[0].trim()
-          : matchedTopic;
-      return {
-        pageNumber: validPageSet.has(page.pageNumber) ? page.pageNumber : 1,
-        topic: matchedTopic,
-        fact: line,
-        term,
-      };
-    });
-
-    if (pageItems.length > 0) {
-      perPageStatements.push(pageItems);
-    }
-  }
-
-  const statements: Array<{
-    pageNumber: number;
-    topic: string;
-    fact: string;
-    term: string;
-  }> = [];
-
-  let round = 0;
-  while (statements.length < targetCount * 2 && round < 10) {
-    let addedInRound = false;
-    for (const bucket of perPageStatements) {
-      if (round < bucket.length) {
-        statements.push(bucket[round]);
-        addedInRound = true;
-      }
-    }
-    if (!addedInRound) break;
-    round++;
-  }
-
-  while (statements.length < targetCount) {
-    const fallbackPage = candidatePages[statements.length % candidatePages.length] || pages[0];
-    statements.push({
-      pageNumber: fallbackPage.pageNumber,
-      topic: fallbackPage.title || `Page ${fallbackPage.pageNumber}`,
-      fact: fallbackPage.content.slice(0, 140).replace(/\s+/g, ' ').trim(),
-      term: fallbackPage.title || `Section ${fallbackPage.pageNumber}`,
-    });
-  }
-
-  const questions = [];
-  for (let i = 0; i < targetCount; i++) {
-    const item = statements[i % statements.length];
-    const otherFacts = statements
-      .filter((s) => s.fact !== item.fact)
-      .map((s) => s.fact);
-
-    const distractor1 =
-      otherFacts[i % Math.max(1, otherFacts.length)] ||
-      `It only applies when the sample space is empty and probability is zero.`;
-    const distractor2 =
-      otherFacts[(i + 1) % Math.max(1, otherFacts.length)] ||
-      `It reverses the relationship by multiplying unrelated constants without normalization.`;
-    const distractor3 =
-      `It assumes ${item.term} is always constant and independent of the conditions on Page ${item.pageNumber}.`;
-
-    const correctOption = item.fact;
-    const correctIndex = i % 4;
-    const options: [string, string, string, string] = ['', '', '', ''];
-    options[correctIndex] = correctOption;
-    let dIdx = 0;
-    const distractors = [distractor1, distractor2, distractor3];
-    for (let slot = 0; slot < 4; slot++) {
-      if (slot !== correctIndex) {
-        options[slot] = distractors[dIdx++];
-      }
-    }
-
-    questions.push({
-      id: `q-${mode}-${Date.now()}-${i + 1}`,
-      topic: item.topic,
-      question:
-        mode === 'adaptive'
-          ? `[Adaptive Focus: ${item.topic}] Based on Page ${item.pageNumber}, which statement accurately describes ${item.term}?`
-          : `According to Page ${item.pageNumber} (${item.topic}), which of the following statements is accurate?`,
-      options,
-      correctIndex,
-      explanation: `Page ${item.pageNumber} explicitly states: "${item.fact}"`,
-      sourcePage: item.pageNumber,
-      sourceQuote: item.fact.slice(0, 160),
-      difficulty: (i % 3 === 0 ? 'easy' : i % 3 === 1 ? 'medium' : 'hard') as
-        | 'easy'
-        | 'medium'
-        | 'hard',
-    });
-  }
-
-  return { questions };
-}
-
 /**
  * Sets up the Gemini Live Voice Tutor WebSocket bridge (/api/live) using model 'gemini-3.8-live'.
  */
@@ -1197,7 +1078,7 @@ function attachGeminiLiveWebSocketServer(
             .join('\n\n');
 
           const systemInstruction = `You are LearnMate's real-time Voice Study Tutor helping a student understand "${sessionTitle}".
-${sessionWeakTopics.length > 0 ? `Student weak topics to reinforce gently: ${sessionWeakTopics.join(', ')}.` : ''}
+${sessionWeakTopics.length > 0 ? `Topics the student recently answered incorrectly (reinforce gently): ${sessionWeakTopics.join(', ')}.` : ''}
 Study Material Reference:
 ${condensedMaterial}
 
@@ -1384,6 +1265,12 @@ async function startServer() {
     rootDir: __dirname,
     isProduction: IS_PRODUCTION,
   });
+  const questionSetStore = firebaseAdmin.questionSetStore;
+  const questionBank = loadVerifiedQuestionBank(__dirname);
+  console.log(
+    `[question-bank] verified servable=${questionBank.questions.length} files=${questionBank.files.length} fullLengthMockAvailable=${canOfferFullLengthMock(questionBank.questions)}`
+  );
+  for (const problem of questionBank.errors) console.warn(`[question-bank] ${problem}`);
   for (const warning of firebaseAdmin.config.warnings) {
     console.warn(`[security] ${warning}`);
   }
@@ -1562,7 +1449,7 @@ async function startServer() {
             studentContext.currentPage ? `Viewing Page: ${studentContext.currentPage}` : '',
             studentContext.currentActivity ? `Learning Mode: ${studentContext.currentActivity}` : '',
             studentContext.weakTopics && studentContext.weakTopics.length > 0
-              ? `Student Weak Topics from Quizzes: ${studentContext.weakTopics.join(', ')}`
+              ? `Topics the student recently answered incorrectly: ${studentContext.weakTopics.join(', ')}`
               : '',
             typeof studentContext.recentScorePct === 'number'
               ? `Latest Quiz Score: ${studentContext.recentScorePct}%`
@@ -1610,7 +1497,7 @@ Follow these exact rules for Hybrid Knowledge Answering:
 5. NO UPLOADED MATERIAL:
    - If no study material pages are provided, answer the educational question normally using general knowledge with "sourceType": "general" and "citations": [].
 6. PERSONALIZED AWARENESS:
-   - When relevant, connect your explanation to the student's active topic or weak topics so they can overcome misconceptions.`,
+   - When relevant, connect your explanation to the student's active topic or recently missed topics so they can overcome misconceptions.`,
           prompt: `Document: ${hasDocument ? title || 'Study Material' : 'None'}\n\nStudy Material Pages:\n${contextText}\n\nConversation History:\n${historyContext}\n\nStudent Question: ${question.trim()}`,
           responseSchema: {
             type: Type.OBJECT,
@@ -1743,241 +1630,275 @@ Follow these exact rules for Hybrid Knowledge Answering:
     }
   });
 
-  // 3. Generate Diagnostic or Adaptive Quiz (5-8 grounded MCQs with 4 choices)
+  // 3. Generate a Diagnostic or Adaptive practice set. Answer keys stay on the server; the client
+  //    receives questions only and submits answers to /api/practice/submit for grading.
   app.post('/api/study/quiz', async (req, res) => {
+    const uid = req.authUser?.uid;
+    if (!uid) {
+      res.status(401).json({ error: 'Please sign in to practise.', code: 'auth_required' });
+      return;
+    }
+    const {
+      documentId = '',
+      title,
+      pages = [],
+      topics = [],
+      mode = 'diagnostic',
+      focusTopics = [],
+      questionCount = 6,
+      forceRefresh = false,
+    } = req.body as {
+      documentId?: string;
+      title?: string;
+      pages?: PageInput[];
+      topics?: TopicInput[];
+      mode?: 'diagnostic' | 'adaptive';
+      focusTopics?: string[];
+      questionCount?: number;
+      forceRefresh?: boolean;
+    };
+
+    const clampedCount = Math.max(MIN_PRACTICE_QUESTIONS, Math.min(30, Number(questionCount) || 6));
+    const validPageNumbers = new Set(pages.map((p) => p.pageNumber));
+    const contextText = formatPagesContext(pages);
+
+    const focusInstruction =
+      mode === 'adaptive' && focusTopics.length > 0
+        ? `This is an ADAPTIVE PRACTICE quiz. Focus all ${clampedCount} questions specifically on these topics the student recently answered incorrectly: ${focusTopics.join(', ')}. Test conceptual understanding from new angles.`
+        : `This is a DIAGNOSTIC QUIZ. Generate ${clampedCount} multiple-choice questions spanning across the key topics in the material (${topics.map((t) => t.name).join(', ') || 'all pages'}).`;
+
+    let validQuestions: ValidatedGeneratedMcq[];
+    let rejectedCount = 0;
     try {
-      const {
-        title,
-        pages,
-        topics = [],
-        mode = 'diagnostic',
-        focusTopics = [],
-        questionCount = 6,
-        forceRefresh = false,
-      } = req.body as {
-        title?: string;
-        pages?: PageInput[];
-        topics?: TopicInput[];
-        mode?: 'diagnostic' | 'adaptive';
-        focusTopics?: string[];
-        questionCount?: number;
-        forceRefresh?: boolean;
-      };
-
-      if (!pages || !Array.isArray(pages) || pages.length === 0) {
-        res.status(400).json({ error: 'Study material pages are required to generate a quiz.' });
-        return;
-      }
-
-      const clampedCount = Math.max(5, Math.min(30, Number(questionCount) || 6));
-      const validPageNumbers = new Set(pages.map((p) => p.pageNumber));
-      const contextText = formatPagesContext(pages);
-
-      const focusInstruction =
-        mode === 'adaptive' && focusTopics.length > 0
-          ? `This is an ADAPTIVE PRACTICE quiz. Focus all ${clampedCount} questions specifically on these weak topics that the student struggled with: ${focusTopics.join(', ')}. Test conceptual understanding from new angles.`
-          : `This is a DIAGNOSTIC QUIZ. Generate ${clampedCount} multiple-choice questions spanning across the key topics in the material (${topics.map((t) => t.name).join(', ') || 'all pages'}).`;
-
-      try {
-        const { data: parsed } = await generateStructuredJson<{
-          questions: Array<{
-            topic: string;
-            question: string;
-            options: string[];
-            correctIndex: number;
-            explanation: string;
-            sourcePage: number;
-            sourceQuote: string;
-            difficulty: 'easy' | 'medium' | 'hard';
-          }>;
-        }>({
-          operation: `study_quiz_${mode}_${clampedCount}`,
-          bypassCache: Boolean(forceRefresh),
-          systemInstruction: `You are LearnMate's assessment generator.
+      const { data: parsed } = await generateStructuredJson<{ questions: GeneratedMcqInput[] }>({
+        operation: `study_quiz_${mode}_${clampedCount}`,
+        bypassCache: Boolean(forceRefresh),
+        validate: (data) => {
+          const { valid } = validateGeneratedMcqSet(data?.questions, { validPageNumbers });
+          if (valid.length < MIN_PRACTICE_QUESTIONS) throw new Error('INSUFFICIENT_VALID_QUESTIONS');
+        },
+        systemInstruction: `You are LearnMate's assessment generator.
 Generate ${clampedCount} grounded Multiple-Choice Questions (MCQs) strictly derived from the provided Study Material Pages.
 Rules:
-- Every question MUST have exactly 4 distinct options.
+- Every question MUST have exactly 4 distinct options with exactly one correct option.
 - "correctIndex" MUST be an integer 0, 1, 2, or 3 corresponding to the single unambiguously correct option in "options".
+- The three incorrect options must be clearly false according to the material.
 - "sourcePage" MUST be an existing page number from the study material.
 - "sourceQuote" MUST be a brief quote or formula from that page supporting the answer.
+- "explanation" MUST explain why the correct option is right.
 - ${focusInstruction}`,
-          prompt: `Document: ${title || 'Study Material'}\n\nStudy Material Pages:\n${contextText}`,
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: {
-              questions: {
-                type: Type.ARRAY,
-                items: {
-                  type: Type.OBJECT,
-                  properties: {
-                    topic: { type: Type.STRING },
-                    question: { type: Type.STRING },
-                    options: {
-                      type: Type.ARRAY,
-                      items: { type: Type.STRING },
-                    },
-                    correctIndex: { type: Type.INTEGER },
-                    explanation: { type: Type.STRING },
-                    sourcePage: { type: Type.INTEGER },
-                    sourceQuote: { type: Type.STRING },
-                    difficulty: { type: Type.STRING },
+        prompt: `Document: ${title || 'Study Material'}\n\nStudy Material Pages:\n${contextText}`,
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            questions: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  topic: { type: Type.STRING },
+                  question: { type: Type.STRING },
+                  options: {
+                    type: Type.ARRAY,
+                    items: { type: Type.STRING },
                   },
-                  required: [
-                    'topic',
-                    'question',
-                    'options',
-                    'correctIndex',
-                    'explanation',
-                    'sourcePage',
-                    'sourceQuote',
-                    'difficulty',
-                  ],
+                  correctIndex: { type: Type.INTEGER },
+                  explanation: { type: Type.STRING },
+                  sourcePage: { type: Type.INTEGER },
+                  sourceQuote: { type: Type.STRING },
+                  difficulty: { type: Type.STRING },
                 },
+                required: [
+                  'topic',
+                  'question',
+                  'options',
+                  'correctIndex',
+                  'explanation',
+                  'sourcePage',
+                  'sourceQuote',
+                  'difficulty',
+                ],
               },
             },
-            required: ['questions'],
           },
-        });
-
-        const rawQuestions = (parsed.questions || []).slice(0, clampedCount);
-        if (rawQuestions.length < 5) {
-          throw new Error('INSUFFICIENT_QUESTIONS');
-        }
-
-        const sanitizedQuestions = rawQuestions.map((q, idx) => {
-          const opts = Array.isArray(q.options) ? q.options.slice(0, 4) : [];
-          while (opts.length < 4) {
-            opts.push(`Option ${opts.length + 1}`);
-          }
-          const safeIndex =
-            typeof q.correctIndex === 'number' && q.correctIndex >= 0 && q.correctIndex <= 3
-              ? q.correctIndex
-              : 0;
-          const safePage = validPageNumbers.has(q.sourcePage)
-            ? q.sourcePage
-            : pages[0].pageNumber;
-          const diff =
-            q.difficulty === 'easy' || q.difficulty === 'medium' || q.difficulty === 'hard'
-              ? q.difficulty
-              : 'medium';
-
-          return {
-            id: `q-${mode}-${Date.now()}-${idx + 1}`,
-            topic: q.topic || topics[idx % Math.max(1, topics.length)]?.name || `Page ${safePage}`,
-            question: q.question,
-            options: [opts[0], opts[1], opts[2], opts[3]] as [string, string, string, string],
-            correctIndex: safeIndex,
-            explanation: q.explanation,
-            sourcePage: safePage,
-            sourceQuote: q.sourceQuote || '',
-            difficulty: diff,
-          };
-        });
-
-        res.json({ questions: sanitizedQuestions });
-      } catch (err) {
-        const notice = extractAiNotice(err);
-        const fallback = buildGroundedFallbackQuiz(
-          pages,
-          topics,
-          mode,
-          focusTopics,
-          clampedCount
-        );
-        res.json({
-          ...fallback,
-          aiStatus: notice.aiStatus,
-          aiNotice: notice.aiNotice,
-        });
-      }
-    } catch (err) {
-      res.status(500).json({
-        error: err instanceof Error ? err.message : 'Failed to generate quiz.',
+          required: ['questions'],
+        },
       });
+      const result = validateGeneratedMcqSet(parsed.questions, { validPageNumbers });
+      validQuestions = result.valid.slice(0, clampedCount);
+      rejectedCount = result.rejected.length;
+    } catch (err) {
+      // No fallback quiz: an unreliable quiz is worse than an honest failure.
+      const notice = extractAiNotice(err);
+      res.status(503).json({
+        error: "We couldn't generate a reliable quiz right now. Please try again in a moment.",
+        code: 'question_generation_failed',
+        aiStatus: notice.aiStatus,
+      });
+      return;
+    }
+
+    const storedSet = createAiPracticeSet({
+      setId: newQuestionSetId(),
+      uid,
+      mode,
+      documentId,
+      documentTitle: title || 'Study Material',
+      focusTopics,
+      questions: validQuestions,
+    });
+
+    try {
+      await questionSetStore.create(storedSet);
+    } catch (err) {
+      console.warn('[practice] could not store question set:', err instanceof Error ? err.message : err);
+      res.status(503).json({
+        error: 'Practice is temporarily unavailable. Please try again shortly.',
+        code: 'practice_unavailable',
+      });
+      return;
+    }
+
+    res.json({
+      setId: storedSet.id,
+      expiresAt: storedSet.expiresAt,
+      source: 'ai',
+      requestedCount: clampedCount,
+      rejectedCount,
+      questions: storedSet.questions.map(toPublicPracticeQuestion),
+    });
+  });
+
+  // 3b. Grade a submitted practice set on the server. Submissions are recorded once per set.
+  app.post('/api/practice/submit', async (req, res) => {
+    const uid = req.authUser?.uid;
+    if (!uid) {
+      res.status(401).json({ error: 'Please sign in to practise.', code: 'auth_required' });
+      return;
+    }
+    const { setId, responses = {} } = req.body as {
+      setId: string;
+      responses?: Record<string, unknown>;
+    };
+
+    let storedSet: StoredQuestionSet | null;
+    try {
+      storedSet = await questionSetStore.get(uid, setId);
+    } catch {
+      res.status(503).json({ error: 'Practice is temporarily unavailable. Please try again shortly.', code: 'practice_unavailable' });
+      return;
+    }
+    if (!storedSet) {
+      res.status(404).json({
+        error: 'This practice set has expired or could not be found. Please start a new one.',
+        code: 'set_not_found',
+      });
+      return;
+    }
+    if (storedSet.submission) {
+      res.json({ attempt: storedSet.submission.attempt, alreadySubmitted: true });
+      return;
+    }
+
+    const graded = gradeSubmission(storedSet, responses);
+    if (!graded.ok) {
+      res.status(graded.status).json({ error: graded.error, code: 'invalid_request' });
+      return;
+    }
+    const attempt = graded.attempt;
+
+    try {
+      const recorded = await questionSetStore.recordSubmission(uid, storedSet.id, {
+        submittedAt: attempt.completedAt,
+        attempt,
+      });
+      if (!recorded) {
+        res.status(404).json({ error: 'This practice set has expired. Please start a new one.', code: 'set_not_found' });
+        return;
+      }
+      res.json({ attempt: recorded.submission.attempt, alreadySubmitted: recorded.alreadySubmitted });
+    } catch {
+      res.status(503).json({ error: 'Your answers could not be saved. Please try submitting again.', code: 'practice_unavailable' });
     }
   });
 
-  // 4. Mistake DNA & Personalized Revision Plan from actual quiz attempt
+  // 4. Mistake analysis & revision plan for a server-graded practice set. Which answers were wrong
+  //    is read from the stored submission, never from the client.
   app.post('/api/study/mistakes-and-plan', async (req, res) => {
+    const uid = req.authUser?.uid;
+    if (!uid) {
+      res.status(401).json({ error: 'Please sign in to practise.', code: 'auth_required' });
+      return;
+    }
+    const { setId, title, pages = [] } = req.body as {
+      setId: string;
+      title?: string;
+      pages?: PageInput[];
+    };
+
+    let storedSet: StoredQuestionSet | null;
     try {
-      const { documentId, title, pages, attempt } = req.body as {
-        documentId: string;
-        title?: string;
-        pages?: PageInput[];
-        attempt?: {
-          id: string;
-          questions: Array<{
-            id: string;
-            topic: string;
-            question: string;
-            options: [string, string, string, string];
-            correctIndex: number;
-            explanation: string;
-            sourcePage: number;
-            sourceQuote: string;
-          }>;
-          answers: Array<{
-            questionId: string;
-            selectedIndex: number;
-            isCorrect: boolean;
-            topic: string;
-            sourcePage: number;
-          }>;
-        };
-      };
+      storedSet = await questionSetStore.get(uid, setId);
+    } catch {
+      res.status(503).json({ error: 'Mistake analysis is temporarily unavailable.', code: 'practice_unavailable' });
+      return;
+    }
+    if (!storedSet) {
+      res.status(404).json({ error: 'This practice set has expired or could not be found.', code: 'set_not_found' });
+      return;
+    }
+    const submitted = storedSet.submission?.attempt;
+    if (!submitted) {
+      res.status(409).json({ error: 'Submit the quiz before analysing mistakes.', code: 'not_submitted' });
+      return;
+    }
 
-      if (!pages || !attempt) {
-        res.status(400).json({ error: 'Pages and quiz attempt data are required.' });
-        return;
-      }
+    const documentId = storedSet.documentId;
+    const validPageNumbers = new Set(pages.map((p) => p.pageNumber));
+    const now = new Date().toISOString();
+    const mistakeInputs = collectMistakeInputs(storedSet)!;
+    const wrongDetails = mistakeInputs.wrongDetails;
 
-      const validPageNumbers = new Set(pages.map((p) => p.pageNumber));
-      const wrongDetails = attempt.answers
-        .filter((a) => !a.isCorrect)
-        .map((ans) => {
-          const q = attempt.questions.find((item) => item.id === ans.questionId);
-          if (!q) return null;
-          return {
-            questionId: q.id,
-            topic: q.topic,
-            question: q.question,
-            selectedOption:
-              ans.selectedIndex >= 0 && ans.selectedIndex < 4
-                ? q.options[ans.selectedIndex]
-                : 'No answer selected',
-            correctOption: q.options[q.correctIndex],
-            explanation: q.explanation,
-            sourcePage: q.sourcePage,
-            sourceQuote: q.sourceQuote,
-          };
-        })
-        .filter((item): item is NonNullable<typeof item> => item !== null);
+    const unansweredTasks = mistakeInputs.unanswered.map(({ topic, count }, idx) => ({
+      id: `rev-${Date.now()}-unanswered-${idx + 1}`,
+      documentId,
+      topic,
+      priority: 'medium' as const,
+      reason: `You left ${count} question(s) on ${topic} unanswered.`,
+      recommendedAction: `Review ${topic} and attempt a short practice set on it.`,
+      conceptSummary: '',
+      sourcePage: 0,
+      completed: false,
+      updatedAt: now,
+    }));
 
-      if (wrongDetails.length === 0) {
-        res.json({
-          mistakes: [],
-          revisionPlan: [
-            {
-              id: `rev-${Date.now()}-mastery`,
-              documentId,
-              topic: 'All Tested Topics Mastered',
-              priority: 'low',
-              reason: 'You scored 100% on your quiz attempt with zero misconceptions detected.',
-              recommendedAction:
-                'Challenge yourself with an Adaptive Practice session or explore deeper questions in the AI Study Tutor.',
-              conceptSummary: 'All core concepts across your material were answered accurately.',
-              sourcePage: pages[0]?.pageNumber || 1,
-              completed: true,
-              updatedAt: new Date().toISOString(),
-            },
-          ],
-        });
-        return;
-      }
+    if (wrongDetails.length === 0) {
+      res.json({
+        mistakes: [],
+        revisionPlan:
+          unansweredTasks.length > 0
+            ? unansweredTasks
+            : [
+                {
+                  id: `rev-${Date.now()}-mastery`,
+                  documentId,
+                  topic: 'All tested topics',
+                  priority: 'low',
+                  reason: 'You answered every question in this quiz correctly.',
+                  recommendedAction: 'Try an adaptive practice set or ask the AI tutor deeper questions.',
+                  conceptSummary: '',
+                  sourcePage: 0,
+                  completed: false,
+                  updatedAt: now,
+                },
+              ],
+      });
+      return;
+    }
 
-      const contextText = formatPagesContext(pages);
+    const contextText = formatPagesContext(pages);
 
-      try {
+    try {
         const { data: parsed } = await generateStructuredJson<{
           mistakes: Array<{
             questionId: string;
@@ -2049,54 +1970,41 @@ Given the study material pages and the exact questions the student answered inco
             question: w.question,
             selectedOption: w.selectedOption,
             correctOption: w.correctOption,
-            likelyMisconception:
-              aiMatch?.likelyMisconception ||
-              `Confused "${w.selectedOption}" with the core rule on Page ${w.sourcePage}.`,
+            likelyMisconception: aiMatch?.likelyMisconception || MISCONCEPTION_UNAVAILABLE,
             coreConceptFix: aiMatch?.coreConceptFix || w.explanation,
-            sourcePage: validPageNumbers.has(w.sourcePage) ? w.sourcePage : 1,
+            sourcePage: w.sourcePage,
             sourceQuote: w.sourceQuote,
           };
         });
 
-        const now = new Date().toISOString();
-        const revisionPlan = (parsed.revisionPlan || []).map((task, idx) => {
-          const priority =
-            task.priority === 'high' || task.priority === 'medium' || task.priority === 'low'
-              ? task.priority
-              : 'high';
-          const safePage = validPageNumbers.has(task.sourcePage)
-            ? task.sourcePage
-            : wrongDetails[idx % wrongDetails.length]?.sourcePage || 1;
-          return {
-            id: `rev-${Date.now()}-${idx + 1}`,
-            documentId,
-            topic: task.topic,
-            priority,
-            reason: task.reason,
-            recommendedAction: task.recommendedAction,
-            conceptSummary: task.conceptSummary,
-            sourcePage: safePage,
-            completed: false,
-            updatedAt: now,
-          };
-        });
+        const revisionPlan = (parsed.revisionPlan || []).map((task, idx) => ({
+          id: `rev-${Date.now()}-${idx + 1}`,
+          documentId,
+          topic: task.topic,
+          priority:
+            task.priority === 'high' || task.priority === 'medium' || task.priority === 'low' ? task.priority : 'high',
+          reason: task.reason,
+          recommendedAction: task.recommendedAction,
+          conceptSummary: task.conceptSummary,
+          sourcePage: validPageNumbers.has(task.sourcePage) ? task.sourcePage : 0,
+          completed: false,
+          updatedAt: now,
+        }));
 
-        res.json({ mistakes, revisionPlan });
+        res.json({ mistakes, revisionPlan: [...revisionPlan, ...unansweredTasks] });
       } catch (err) {
         const notice = extractAiNotice(err);
-        const now = new Date().toISOString();
         const mistakes = wrongDetails.map((w) => ({
           questionId: w.questionId,
           topic: w.topic,
           question: w.question,
           selectedOption: w.selectedOption,
           correctOption: w.correctOption,
-          likelyMisconception: `Selecting "${w.selectedOption}" overlooks the key condition stated on Page ${w.sourcePage}.`,
+          likelyMisconception: MISCONCEPTION_UNAVAILABLE,
           coreConceptFix: w.explanation,
           sourcePage: w.sourcePage,
           sourceQuote: w.sourceQuote,
         }));
-
         const uniqueTopics = Array.from(new Set(wrongDetails.map((w) => w.topic)));
         const revisionPlan = uniqueTopics.map((topic, idx) => {
           const sample = wrongDetails.find((w) => w.topic === topic)!;
@@ -2105,27 +2013,21 @@ Given the study material pages and the exact questions the student answered inco
             documentId,
             topic,
             priority: 'high' as const,
-            reason: `Missed ${wrongDetails.filter((w) => w.topic === topic).length} question(s) on ${topic}.`,
-            recommendedAction: `Re-read Page ${sample.sourcePage} carefully and run an Adaptive Practice quiz on ${topic}.`,
+            reason: `Missed ${wrongDetails.filter((w) => w.topic === topic).length} question(s) on ${topic} in this quiz.`,
+            recommendedAction: `Re-read page ${sample.sourcePage} and try an adaptive practice set on ${topic}.`,
             conceptSummary: sample.explanation,
             sourcePage: sample.sourcePage,
             completed: false,
             updatedAt: now,
           };
         });
-
         res.json({
           mistakes,
-          revisionPlan,
+          revisionPlan: [...revisionPlan, ...unansweredTasks],
           aiStatus: notice.aiStatus,
           aiNotice: notice.aiNotice,
         });
       }
-    } catch (err) {
-      res.status(500).json({
-        error: err instanceof Error ? err.message : 'Failed to diagnose mistakes.',
-      });
-    }
   });
 
   // 5. On-Demand Quick Revise Generator (Sticky Notes & Flashcards OR Mind Map & One-Page Revision)

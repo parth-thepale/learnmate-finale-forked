@@ -92,6 +92,28 @@ export interface QuizQuestion {
   difficulty: 'easy' | 'medium' | 'hard';
 }
 
+/**
+ * A practice question as the client receives it before submission: no answer key,
+ * explanation or supporting quote. Answers are revealed only in the graded attempt.
+ */
+export interface PracticeQuizQuestion {
+  id: string;
+  source: 'pyq' | 'curated' | 'ai';
+  topic: string;
+  question: string;
+  options: [string, string, string, string];
+  sourcePage: number;
+  difficulty: 'easy' | 'medium' | 'hard';
+}
+
+/** A server-held practice set cached on the device so it can be resumed before submission. */
+export interface CachedPracticeSet {
+  setId: string;
+  questions: PracticeQuizQuestion[];
+  createdAt: string;
+  expiresAt: string;
+}
+
 export interface QuizAttemptAnswer {
   questionId: string;
   selectedIndex: number;

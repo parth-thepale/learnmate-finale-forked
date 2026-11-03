@@ -1,8 +1,8 @@
 import type {
+  CachedPracticeSet,
   MistakeInsight,
   QuickReviseBundle,
   QuizAttempt,
-  QuizQuestion,
   RevisionTask,
   StudyDocument,
   StudyPage,
@@ -254,7 +254,7 @@ export interface StudyStatePayload {
   tutorMessages: TutorMessage[];
   mistakes: MistakeInsight[];
   revisionPlan: RevisionTask[];
-  cachedQuiz: QuizQuestion[];
+  cachedQuiz: CachedPracticeSet | null;
   quickRevise: QuickReviseBundle | null;
 }
 
@@ -271,7 +271,7 @@ export function encodeStudyState(
     tutorMessagesJson: JSON.stringify(state.tutorMessages || []),
     mistakesJson: JSON.stringify(state.mistakes || []),
     revisionPlanJson: JSON.stringify(state.revisionPlan || []),
-    cachedQuizJson: JSON.stringify(state.cachedQuiz || []),
+    cachedQuizJson: state.cachedQuiz ? JSON.stringify(state.cachedQuiz) : '',
     quickReviseJson: state.quickRevise ? JSON.stringify(state.quickRevise) : '',
   };
   if (fitsInline(fields, LEGACY_LIMITS)) {
@@ -300,7 +300,11 @@ export async function decodeStudyState(
     tutorMessages: parseField<TutorMessage[]>('tutorMessagesJson', []),
     mistakes: parseField<MistakeInsight[]>('mistakesJson', []),
     revisionPlan: parseField<RevisionTask[]>('revisionPlanJson', []),
-    cachedQuiz: parseField<QuizQuestion[]>('cachedQuizJson', []),
+    // Legacy caches were arrays of questions that included answer keys; they are not restored.
+    cachedQuiz: ((): CachedPracticeSet | null => {
+      const parsed = parseField<unknown>('cachedQuizJson', null);
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? (parsed as CachedPracticeSet) : null;
+    })(),
     quickRevise: parseField<QuickReviseBundle | null>('quickReviseJson', null),
   };
 }

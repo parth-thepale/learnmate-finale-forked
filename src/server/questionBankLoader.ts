@@ -1,0 +1,51 @@
+import fs from 'fs';
+import path from 'path';
+import type { BankQuestion } from '../types/questionBank';
+import { loadBank, servableQuestions } from '../utils/questionBank';
+
+export interface LoadedQuestionBankFiles {
+  questions: BankQuestion[];
+  errors: string[];
+  files: string[];
+  skippedUnverified: number;
+}
+
+/** Reads JSON arrays of bank questions from a directory (non-recursive). */
+export function readQuestionFiles(dir: string): { records: unknown[]; files: string[]; errors: string[] } {
+  const records: unknown[] = [];
+  const files: string[] = [];
+  const errors: string[] = [];
+  if (!fs.existsSync(dir)) return { records, files, errors };
+  for (const name of fs.readdirSync(dir).filter((n) => n.endsWith('.json')).sort()) {
+    const file = path.join(dir, name);
+    files.push(file);
+    try {
+      const parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
+      if (!Array.isArray(parsed)) {
+        errors.push(`${name}: file must contain a JSON array of questions.`);
+        continue;
+      }
+      records.push(...parsed);
+    } catch (err) {
+      errors.push(`${name}: ${err instanceof Error ? err.message : 'unreadable JSON'}`);
+    }
+  }
+  return { records, files, errors };
+}
+
+/**
+ * Loads the student-facing bank: only `verified/` files, and only questions that are both valid and
+ * marked verified by a reviewer. Drafts are never loaded.
+ */
+export function loadVerifiedQuestionBank(rootDir: string): LoadedQuestionBankFiles {
+  const dir = path.resolve(rootDir, 'data', 'question-bank', 'verified');
+  const { records, files, errors: fileErrors } = readQuestionFiles(dir);
+  const loaded = loadBank(records);
+  const servable = servableQuestions(loaded.questions);
+  return {
+    questions: servable,
+    errors: [...fileErrors, ...loaded.errors],
+    files,
+    skippedUnverified: loaded.questions.length - servable.length,
+  };
+}

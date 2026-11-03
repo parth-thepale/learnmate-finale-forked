@@ -17,6 +17,10 @@ export default defineConfig(() => {
       hmr: process.env.DISABLE_HMR !== 'true',
       // Disable file watching when DISABLE_HMR is true to save CPU during agent edits.
       watch: process.env.DISABLE_HMR === 'true' ? null : {},
+      // Never let the dev server serve the server-only question bank (answer keys).
+      fs: {
+        deny: ['.env', '.env.*', '*.{crt,pem}', '**/.git/**', '**/data/question-bank/**'],
+      },
     },
     build: {
       sourcemap: false,
