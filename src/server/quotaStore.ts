@@ -87,6 +87,8 @@ export interface QuotaDocSnapshot {
 export interface QuotaTransaction {
   get(ref: unknown): Promise<QuotaDocSnapshot>;
   set(ref: unknown, data: Record<string, unknown>): unknown;
+  /** Admin SDK Transaction#delete (needed when a submission replaces stale attempt chunks). */
+  delete?(ref: unknown): unknown;
 }
 export interface QuotaFirestore {
   collection(path: string): { doc(id: string): unknown };

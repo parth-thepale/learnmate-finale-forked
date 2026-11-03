@@ -185,8 +185,13 @@ test('payload validation rejects malformed and oversized requests without chargi
     const missingPages = await post(base, '/api/study/quiz', { mode: 'diagnostic' }, 'uid:alice');
     assert.equal(missingPages.status, 400);
 
-    const badMode = await post(base, '/api/study/quiz', { pages, mode: 'exam' }, 'uid:alice');
+    const badMode = await post(base, '/api/study/quiz', { pages, documentId: 'doc-1', mode: 'exam' }, 'uid:alice');
     assert.equal(badMode.status, 400);
+
+    // Document practice needs a real document id (the old "unknown" placeholder is gone).
+    for (const body of [{ pages }, { pages, documentId: '' }, { pages, documentId: 'unknown' }, { pages, documentId: 'a/b' }]) {
+      assert.equal((await post(base, '/api/study/quiz', body, 'uid:alice')).status, 400, JSON.stringify(body.documentId));
+    }
 
     const badImage = await post(base, '/api/study/scan-notes', { imageDataUrl: 'data:text/html;base64,AAAA' }, 'uid:alice');
     assert.equal(badImage.status, 400);
@@ -197,7 +202,7 @@ test('payload validation rejects malformed and oversized requests without chargi
 
     assert.deepEqual(handlerHits, []);
     // Quota untouched: a valid 2-unit quiz still fits in the 2-unit daily budget.
-    assert.equal((await post(base, '/api/study/quiz', { pages }, 'uid:alice')).status, 200);
+    assert.equal((await post(base, '/api/study/quiz', { pages, documentId: 'doc-1' }, 'uid:alice')).status, 200);
   });
 });
 
@@ -222,9 +227,9 @@ test('daily quota is enforced per user and is not shared between users', async (
   const { app, handlerHits } = buildApp({ dailyUnitLimit: 5 });
   await withTestServer(app, async (base) => {
     // quiz = 2 units: 2 + 2 = 4 allowed, third would be 6 > 5.
-    assert.equal((await post(base, '/api/study/quiz', { pages }, 'uid:alice')).status, 200);
-    assert.equal((await post(base, '/api/study/quiz', { pages }, 'uid:alice')).status, 200);
-    const blocked = await post(base, '/api/study/quiz', { pages }, 'uid:alice');
+    assert.equal((await post(base, '/api/study/quiz', { pages, documentId: 'doc-1' }, 'uid:alice')).status, 200);
+    assert.equal((await post(base, '/api/study/quiz', { pages, documentId: 'doc-1' }, 'uid:alice')).status, 200);
+    const blocked = await post(base, '/api/study/quiz', { pages, documentId: 'doc-1' }, 'uid:alice');
     assert.equal(blocked.status, 429);
     const body = await blocked.json();
     assert.equal(body.code, 'daily_quota_exceeded');
@@ -236,7 +241,7 @@ test('daily quota is enforced per user and is not shared between users', async (
     assert.equal((await post(base, '/api/study/ask', { question: 'Why?' }, 'uid:alice')).status, 429);
 
     // Another user has an independent budget.
-    assert.equal((await post(base, '/api/study/quiz', { pages }, 'uid:bob')).status, 200);
+    assert.equal((await post(base, '/api/study/quiz', { pages, documentId: 'doc-1' }, 'uid:bob')).status, 200);
     assert.equal(handlerHits.length, 4);
   });
 });

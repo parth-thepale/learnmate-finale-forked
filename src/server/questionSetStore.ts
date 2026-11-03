@@ -1,8 +1,15 @@
 import { randomUUID } from 'crypto';
-import type { AttemptKind, McqOption, QuestionDifficulty, QuestionSource } from '../types/questionBank';
+import { chunkCountOf } from '../services/cloudEntities';
+import { cloudPaths } from '../services/cloudStore';
+import type { AttemptContext, AttemptKind, McqOption, QuestionDifficulty, QuestionSource } from '../types/questionBank';
+import { trustedAttemptIdFor, validateTrustedAttempt } from '../utils/attemptContext';
 import type { GradedQuizAttempt } from '../utils/attemptV2';
 import { FirestoreDataError, toFirestoreData } from '../utils/firestoreData';
+import { isIsoUtcTimestamp } from '../utils/sessionModel';
 import type { QuotaFirestore } from './quotaStore';
+import { encodeTrustedAttemptRecord, TrustedAttemptRejectedError } from './trustedAttemptRecord';
+
+export { TrustedAttemptRejectedError };
 
 /**
  * Server-held question sets. Answer keys and explanations live only here until the student
@@ -36,8 +43,13 @@ export interface StoredQuestionSet {
   uid: string;
   kind: AttemptKind;
   mode: 'diagnostic' | 'adaptive';
+  /** "" for syllabus-context sets. */
   documentId: string;
   documentTitle: string;
+  /** What is practised (always set on new sets; older sets are resolved by contextOfSet). */
+  context?: AttemptContext;
+  /** Registered marking scheme used for grading (older sets were graded with jee_main_2026). */
+  markingSchemeId?: string;
   sessionId?: string;
   targetTopics?: string[];
   createdAt: string;
@@ -62,12 +74,49 @@ export interface QuestionSetStore {
   create(set: StoredQuestionSet): Promise<void>;
   /** Returns null when missing, owned by another user, or expired. */
   get(uid: string, setId: string, now?: Date): Promise<StoredQuestionSet | null>;
-  /** Records the first submission; later calls return the original one. */
+  /**
+   * Records the first submission and persists the trusted attempt atomically (Firestore: one
+   * transaction for questionSets/{id} and users/{uid}/attempts/att-{id}). Later calls return the
+   * original submission without writing. Throws TrustedAttemptRejectedError when the attempt does
+   * not match the stored set or fails validation (nothing is written).
+   */
   recordSubmission(
     uid: string,
     setId: string,
     submission: StoredSubmission
   ): Promise<{ submission: StoredSubmission; alreadySubmitted: boolean } | null>;
+}
+
+/**
+ * The submitted attempt must be exactly what grading this stored set produces: same identity,
+ * questions (in order), context, marking, sources and session, and it must pass
+ * validateTrustedAttempt. By-reference attempts must not carry any of the set's question content.
+ */
+export function checkSubmissionAgainstSet(set: StoredQuestionSet, submission: StoredSubmission): void {
+  const a = submission?.attempt;
+  const problems: string[] = [];
+  if (!a || typeof a !== 'object') throw new TrustedAttemptRejectedError(['submission has no attempt.']);
+  if (!isIsoUtcTimestamp(submission.submittedAt)) problems.push('submittedAt must be an ISO UTC timestamp.');
+  problems.push(...validateTrustedAttempt(a));
+  if (a.questionSetId !== set.id || a.id !== trustedAttemptIdFor(set.id)) problems.push('attempt does not belong to this question set.');
+  const outcomeIds = Array.isArray(a.outcomes) ? a.outcomes.map((o) => o.questionId) : [];
+  if (outcomeIds.join('\u0000') !== set.questions.map((q) => q.id).join('\u0000')) problems.push('attempt questions differ from the stored set.');
+  if (a.kind !== set.kind || a.mode !== set.mode) problems.push('attempt kind or mode differs from the stored set.');
+  if ((a.sessionId ?? null) !== (set.sessionId ?? null)) problems.push('attempt sessionId differs from the stored set.');
+  if (a.documentId !== set.documentId) problems.push('attempt documentId differs from the stored set.');
+  if (set.context && JSON.stringify(a.context) !== JSON.stringify(set.context)) problems.push('attempt context differs from the stored set.');
+  if (a.markingSchemeId !== (set.markingSchemeId ?? 'jee_main_2026')) problems.push('attempt marking differs from the stored set.');
+  const setSources = [...new Set(set.questions.map((q) => q.source))].sort().join(',');
+  if (!Array.isArray(a.sources) || [...a.sources].sort().join(',') !== setSources) problems.push('attempt sources differ from the stored set.');
+  if (a.reviewMode === 'by_reference') {
+    // No stored question text, option, explanation or quote may appear anywhere in the attempt.
+    const serialized = JSON.stringify(a);
+    const leaked = set.questions.some((q) =>
+      [q.stem, q.explanation, q.sourceQuote, ...q.options.map((o) => o.text)].some((text) => typeof text === 'string' && text.trim().length >= 12 && serialized.includes(JSON.stringify(text).slice(1, -1)))
+    );
+    if (leaked) problems.push('by_reference attempt contains question content from the set.');
+  }
+  if (problems.length > 0) throw new TrustedAttemptRejectedError(problems);
 }
 
 export function newQuestionSetId(): string {
@@ -111,6 +160,8 @@ function isUsable(set: StoredQuestionSet | null | undefined, uid: string, now: D
 export class MemoryQuestionSetStore implements QuestionSetStore {
   readonly kind = 'memory' as const;
   private readonly sets = new Map<string, StoredQuestionSet>();
+  /** Trusted attempt records as they would be written to Firestore (path -> data). */
+  readonly attemptRecords = new Map<string, Record<string, unknown>>();
 
   async create(set: StoredQuestionSet): Promise<void> {
     assertSize(set);
@@ -127,8 +178,13 @@ export class MemoryQuestionSetStore implements QuestionSetStore {
     const set = this.sets.get(setId);
     if (!isUsable(set, uid, new Date())) return null;
     if (set.submission) return { submission: structuredClone(set.submission), alreadySubmitted: true };
-    set.submission = structuredClone(submission);
-    return { submission: structuredClone(submission), alreadySubmitted: false };
+    checkSubmissionAgainstSet(set, submission);
+    const ops = encodeTrustedAttemptRecord(uid, submission.attempt, 0);
+    // Keep exactly what Firestore would store, so every caller sees the same authoritative result.
+    const stored = questionSetToFirestore({ ...set, submission }).submission as StoredSubmission;
+    set.submission = structuredClone(stored);
+    for (const op of ops) if (op.type === 'set') this.attemptRecords.set(op.path, structuredClone(op.data));
+    return { submission: structuredClone(stored), alreadySubmitted: false };
   }
 }
 
@@ -159,6 +215,12 @@ export class FirestoreQuestionSetStore implements QuestionSetStore {
     return this.db.collection(this.collectionName).doc(setId);
   }
 
+  /** Reference for any document path (e.g. users/{uid}/attempts/{id}/chunks/0). */
+  private docRef(path: string): unknown {
+    const cut = path.lastIndexOf('/');
+    return this.db.collection(path.slice(0, cut)).doc(path.slice(cut + 1));
+  }
+
   async create(set: StoredQuestionSet): Promise<void> {
     assertSize(set);
     try {
@@ -184,6 +246,12 @@ export class FirestoreQuestionSetStore implements QuestionSetStore {
     }
   }
 
+  /**
+   * One transaction: read the set (ownership, expiry, prior submission) and the attempt record,
+   * validate, then write the submission and the trusted attempt (parent + chunks, removing stale
+   * chunks). All reads happen before any write. Concurrent submissions serialise on the set
+   * document, so exactly one result is stored; every later call returns that stored result.
+   */
   async recordSubmission(uid: string, setId: string, submission: StoredSubmission) {
     try {
       return await this.db.runTransaction(async (tx) => {
@@ -191,12 +259,29 @@ export class FirestoreQuestionSetStore implements QuestionSetStore {
         const data = snap.exists ? (snap.data() as unknown as StoredQuestionSet) : null;
         if (!isUsable(data, uid, new Date())) return null;
         if (data.submission) return { submission: data.submission, alreadySubmitted: true };
-        const updated = { ...stripFirestoreFields(data), submission };
+        const set = stripFirestoreFields(data);
+        checkSubmissionAgainstSet(set, submission);
+
+        const attemptPath = cloudPaths.attempt(uid, submission.attempt.id);
+        const existing = await tx.get(this.docRef(attemptPath));
+        const ops = encodeTrustedAttemptRecord(uid, submission.attempt, chunkCountOf(existing.exists ? existing.data() ?? null : null));
+        const updated = { ...set, submission };
         assertSize(updated);
-        tx.set(this.ref(setId), questionSetToFirestore(updated));
-        return { submission, alreadySubmitted: false };
+        if (ops.some((op) => op.type === 'delete') && typeof tx.delete !== 'function') {
+          throw new Error('Transaction does not support deletes.');
+        }
+
+        const stored = questionSetToFirestore(updated);
+        tx.set(this.ref(setId), stored);
+        for (const op of ops) {
+          if (op.type === 'delete') tx.delete!(this.docRef(op.path));
+          else tx.set(this.docRef(op.path), op.data);
+        }
+        // Return what was persisted (not the caller's object), identical to what replays return.
+        return { submission: stored.submission as StoredSubmission, alreadySubmitted: false };
       });
     } catch (err) {
+      if (err instanceof TrustedAttemptRejectedError) throw err;
       throw new QuestionSetUnavailableError(err instanceof Error ? err.message.slice(0, 160) : 'submission failed');
     }
   }

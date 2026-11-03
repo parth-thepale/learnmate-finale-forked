@@ -174,6 +174,13 @@ const validateAsk: BodyValidator = (b) => {
   return OK;
 };
 
+/** Document practice must name a real document (no placeholder ids such as "unknown"). */
+function requireDocumentId(b: Record<string, unknown>): ValidationResult {
+  return typeof b.documentId === 'string' && /^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/.test(b.documentId) && b.documentId !== 'unknown'
+    ? OK
+    : fail('"documentId" must identify the document being practised.');
+}
+
 const validateQuiz: BodyValidator = (b) => {
   if (b.mode !== undefined && b.mode !== 'diagnostic' && b.mode !== 'adaptive') {
     return fail('"mode" must be "diagnostic" or "adaptive".');
@@ -183,11 +190,11 @@ const validateQuiz: BodyValidator = (b) => {
   }
   return all(
     optionalString(b, 'title', REQUEST_LIMITS.maxTitleChars),
-    optionalString(b, 'documentId', 200),
     optionalBoolean(b, 'forceRefresh'),
     optionalStringList(b, 'focusTopics', REQUEST_LIMITS.maxFocusTopics, REQUEST_LIMITS.maxShortStringChars),
     validatePages(b.pages, true),
-    validateTopics(b.topics)
+    validateTopics(b.topics),
+    requireDocumentId(b)
   );
 };
 

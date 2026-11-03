@@ -1,5 +1,5 @@
 import type { QuizAttempt, QuizAttemptAnswer, QuizQuestion } from '../types/study';
-import type { AttemptKind, AttemptScore, AttemptV2Fields, QuestionSource } from '../types/questionBank';
+import type { AttemptContext, AttemptKind, AttemptReviewMode, AttemptScore, AttemptV2Fields, MarkingScheme, QuestionSource } from '../types/questionBank';
 
 export type GradedQuizAttempt = QuizAttempt & AttemptV2Fields;
 
@@ -10,6 +10,9 @@ export type GradedQuizAttempt = QuizAttempt & AttemptV2Fields;
  *
  * `weakTopics` keeps its legacy meaning (topics missed in *this* attempt). Whether a topic is
  * actually weak is decided across attempts by utils/weakTopics.ts.
+ *
+ * reviewMode 'by_reference' (bank/PYQ content) keeps question ids and outcomes only: no question
+ * text, options, explanations or answer keys are copied into the attempt.
  */
 export function buildGradedAttempt(params: {
   attemptId: string;
@@ -21,6 +24,9 @@ export function buildGradedAttempt(params: {
   sessionId?: string;
   targetTopics?: string[];
   sources: QuestionSource[];
+  context: AttemptContext;
+  marking: MarkingScheme;
+  reviewMode: AttemptReviewMode;
   /** Questions with answers revealed after submission (shown in the review). */
   reviewQuestions: QuizQuestion[];
   selectedIndices: Record<string, number>;
@@ -59,7 +65,7 @@ export function buildGradedAttempt(params: {
     documentTitle: params.documentTitle,
     mode: params.mode,
     targetTopics: params.targetTopics,
-    questions: params.reviewQuestions,
+    questions: params.reviewMode === 'by_reference' ? [] : params.reviewQuestions,
     answers,
     score: correctCount,
     totalQuestions: total,
@@ -78,6 +84,9 @@ export function buildGradedAttempt(params: {
     sources: params.sources,
     scoredBy: 'server',
     markingSchemeId: params.score.scheme.id,
+    marking: { id: params.marking.id, correct: params.marking.correct, incorrect: params.marking.incorrect, unanswered: params.marking.unanswered },
+    context: params.context,
+    reviewMode: params.reviewMode,
     correctCount: params.score.correct,
     incorrectCount: params.score.incorrect,
     unansweredCount: params.score.unanswered,
@@ -86,6 +95,7 @@ export function buildGradedAttempt(params: {
       outcome: q.outcome,
       topicIds: q.topicIds,
       topicLabel: q.topicLabel,
+      ...(params.context.type === 'syllabus' ? { subjectId: params.context.subjectId } : {}),
       chapterId: q.chapterId,
     })),
   };

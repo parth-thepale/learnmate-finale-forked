@@ -1,31 +1,99 @@
-import type { McqOption, QuestionResponse } from '../types/questionBank';
+import { findSyllabusChapter, findSyllabusSubject, findSyllabusTopic, getSyllabusRevision } from '../data/syllabusRegistry';
+import type { AttemptContext, AttemptReviewMode, McqOption, QuestionResponse, QuestionSource } from '../types/questionBank';
 import type { PracticeQuizQuestion } from '../types/study';
+import { ATTEMPT_LIMITS, validateAttemptContext, validateTrustedAttempt } from '../utils/attemptContext';
 import { buildGradedAttempt, type GradedQuizAttempt } from '../utils/attemptV2';
 import { JEE_MAIN_MARKING, scoreAttempt } from '../utils/jeeScoring';
+import { getMarkingScheme, markingSchemeForExam } from '../utils/markingSchemes';
 import { validateResponse, type ValidatedGeneratedMcq } from '../utils/questionValidation';
 import { QUESTION_SET_TTL_MS, type StoredQuestion, type StoredQuestionSet } from './questionSetStore';
 
 export const MCQ_OPTION_IDS: Array<McqOption['id']> = ['A', 'B', 'C', 'D'];
 
-/** Builds the server-held set (with answer keys) from validated AI questions. */
+/**
+ * Marking for AI practice built from a student's document. This has always been JEE-style
+ * (+4/−1/0); it is now looked up from the marking registry instead of being fixed in grading.
+ */
+export const DOCUMENT_PRACTICE_MARKING_ID = JEE_MAIN_MARKING.id;
+/** Sets stored before context/marking were recorded were all graded with this scheme. */
+const LEGACY_SET_MARKING_ID = JEE_MAIN_MARKING.id;
+
+export class PracticeSetContextError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'PracticeSetContextError';
+  }
+}
+
+/** Display label for a syllabus context, from its exact registered revision. */
+export function syllabusContextLabel(context: Extract<AttemptContext, { type: 'syllabus' }>): string {
+  const syllabus = getSyllabusRevision(context.syllabusId, context.syllabusRevision);
+  const subject = syllabus ? findSyllabusSubject(syllabus, context.subjectId) : undefined;
+  const chapter = syllabus ? findSyllabusChapter(syllabus, context.chapterId) : undefined;
+  return `${subject?.name ?? context.subjectId} · ${chapter?.name ?? context.chapterId}`.slice(0, ATTEMPT_LIMITS.titleLength);
+}
+
+/**
+ * Builds the server-held set (with answer keys) from validated AI questions. The context is
+ * explicit and validated: document practice needs a real documentId (no placeholder), syllabus
+ * practice needs registered ids and a registered topic for every question.
+ */
 export function createAiPracticeSet(params: {
   setId: string;
   uid: string;
   mode: 'diagnostic' | 'adaptive';
-  documentId: string;
-  documentTitle: string;
+  /** Syllabus (or explicit document) context; when omitted, documentId/documentTitle are used. */
+  context?: AttemptContext;
+  documentId?: string;
+  documentTitle?: string;
+  markingSchemeId?: string;
+  sessionId?: string;
   focusTopics?: string[];
-  questions: ValidatedGeneratedMcq[];
+  questions: Array<ValidatedGeneratedMcq & { topicIds?: string[] }>;
   now?: Date;
 }): StoredQuestionSet {
   const now = params.now ?? new Date();
+  const context: AttemptContext = params.context ?? {
+    type: 'document',
+    documentId: typeof params.documentId === 'string' ? params.documentId : '',
+    documentTitle: String(params.documentTitle || 'Study Material').slice(0, ATTEMPT_LIMITS.titleLength),
+  };
+  const contextErrors = validateAttemptContext(context);
+  if (context.type === 'document' && context.documentId === 'unknown') contextErrors.push('"unknown" is not a document id.');
+  if (contextErrors.length > 0) throw new PracticeSetContextError(contextErrors.join(' '));
+
+  const markingSchemeId =
+    params.markingSchemeId ?? (context.type === 'syllabus' ? markingSchemeForExam(context.examType)?.id : DOCUMENT_PRACTICE_MARKING_ID);
+  if (!getMarkingScheme(markingSchemeId)) throw new PracticeSetContextError('No registered marking scheme for this practice.');
+
+  if (context.type === 'syllabus') {
+    const syllabus = getSyllabusRevision(context.syllabusId, context.syllabusRevision)!;
+    const allowed = context.topicIds.length > 0 ? new Set(context.topicIds) : null;
+    params.questions.forEach((q, i) => {
+      const ids = q.topicIds ?? [];
+      if (ids.length === 0) throw new PracticeSetContextError(`Question ${i + 1} has no syllabus topic.`);
+      for (const id of ids) {
+        const found = findSyllabusTopic(syllabus, id);
+        if (!found || found.chapter.id !== context.chapterId || (allowed && !allowed.has(id))) {
+          throw new PracticeSetContextError(`Question ${i + 1} topic "${id}" is not part of this practice.`);
+        }
+      }
+    });
+  }
+  if (params.sessionId !== undefined && (!params.sessionId || params.sessionId.length > 160 || params.sessionId.includes('/'))) {
+    throw new PracticeSetContextError('Invalid session id.');
+  }
+
   return {
     id: params.setId,
     uid: params.uid,
     kind: 'ai_practice',
     mode: params.mode,
-    documentId: String(params.documentId || 'unknown').slice(0, 160),
-    documentTitle: String(params.documentTitle || 'Study Material').slice(0, 300),
+    documentId: context.type === 'document' ? context.documentId : '',
+    documentTitle: context.type === 'document' ? context.documentTitle : syllabusContextLabel(context),
+    context,
+    markingSchemeId: markingSchemeId!,
+    ...(params.sessionId ? { sessionId: params.sessionId } : {}),
     targetTopics: params.mode === 'adaptive' ? (params.focusTopics || []).slice(0, 40) : undefined,
     createdAt: now.toISOString(),
     expiresAt: new Date(now.getTime() + QUESTION_SET_TTL_MS).toISOString(),
@@ -34,7 +102,8 @@ export function createAiPracticeSet(params: {
       type: 'mcq',
       source: 'ai',
       topicLabel: q.topic,
-      topicIds: [],
+      topicIds: context.type === 'syllabus' ? [...(q.topicIds ?? [])] : [],
+      ...(context.type === 'syllabus' ? { chapterId: context.chapterId } : {}),
       stem: q.question,
       options: q.options.map((text, i) => ({ id: MCQ_OPTION_IDS[i], text })),
       correctOptionId: MCQ_OPTION_IDS[q.correctIndex],
@@ -61,7 +130,16 @@ export function toPublicPracticeQuestion(q: StoredQuestion): PracticeQuizQuestio
 
 export type GradeResult =
   | { ok: true; attempt: GradedQuizAttempt }
-  | { ok: false; status: 400; error: string };
+  | { ok: false; status: 400 | 409 | 500; error: string };
+
+const BANK_SOURCES: readonly QuestionSource[] = ['pyq', 'curated'];
+
+/** The set's context; sets stored before contexts existed are document-linked only with a real documentId. */
+export function contextOfSet(set: StoredQuestionSet): AttemptContext | null {
+  if (set.context) return validateAttemptContext(set.context).length === 0 ? set.context : null;
+  if (!set.documentId || set.documentId === 'unknown' || set.documentId.length > 160 || set.documentId.includes('/')) return null;
+  return { type: 'document', documentId: set.documentId, documentTitle: set.documentTitle || 'Study Material' };
+}
 
 /** Validates responses against the stored set and scores them with the stored answer keys. */
 export function gradeSubmission(
@@ -77,6 +155,13 @@ export function gradeSubmission(
     if (problem) return { ok: false, status: 400, error: problem };
   }
 
+  const context = contextOfSet(set);
+  if (!context) return { ok: false, status: 409, error: 'This practice set was created by an older version. Please start a new one.' };
+  const marking = getMarkingScheme(set.markingSchemeId ?? LEGACY_SET_MARKING_ID);
+  if (!marking) return { ok: false, status: 409, error: 'This practice set uses an unknown marking scheme. Please start a new one.' };
+  const sources = [...new Set(set.questions.map((q) => q.source))];
+  const reviewMode: AttemptReviewMode = sources.some((s) => BANK_SOURCES.includes(s)) ? 'by_reference' : 'embedded';
+
   const typed = responses as Record<string, QuestionResponse>;
   const score = scoreAttempt(
     set.questions.map((q) => ({
@@ -88,7 +173,7 @@ export function gradeSubmission(
       chapterId: q.chapterId,
     })),
     typed,
-    JEE_MAIN_MARKING
+    marking
   );
 
   const selectedIndices: Record<string, number> = {};
@@ -106,7 +191,10 @@ export function gradeSubmission(
     documentTitle: set.documentTitle,
     sessionId: set.sessionId,
     targetTopics: set.targetTopics,
-    sources: [...new Set(set.questions.map((q) => q.source))],
+    sources,
+    context,
+    marking,
+    reviewMode,
     reviewQuestions: set.questions.map((q) => ({
       id: q.id,
       topic: q.topicLabel,
@@ -122,6 +210,11 @@ export function gradeSubmission(
     score,
     completedAt: now.toISOString(),
   });
+  const problems = validateTrustedAttempt(attempt);
+  if (problems.length > 0) {
+    console.warn(`[practice] graded attempt for ${set.id} failed validation: ${problems.slice(0, 3).join(' | ')}`);
+    return { ok: false, status: 500, error: 'Your answers could not be graded. Please try again.' };
+  }
   return { ok: true, attempt };
 }
 

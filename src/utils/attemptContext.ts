@@ -1,4 +1,11 @@
-import { findSyllabusChapter, findSyllabusSubject, findSyllabusTopic, getSyllabus, isRegisteredTopicId } from '../data/syllabusRegistry';
+import {
+  findSyllabusChapter,
+  findSyllabusSubject,
+  findSyllabusTopic,
+  getSyllabusRevision,
+  isRegisteredSyllabusId,
+  isRegisteredTopicId,
+} from '../data/syllabusRegistry';
 import type { AttemptContext, AttemptKind, QuestionSource, ResponseOutcome } from '../types/questionBank';
 import type { ExamTypeId } from '../types/study';
 import { marksFor } from './jeeScoring';
@@ -8,10 +15,9 @@ import { isIsoUtcTimestamp } from './sessionModel';
 /**
  * Attempt context and trusted-attempt validation (pure; shared by server and client).
  *
- * Trust model: an attempt is *verified* only when it carries the trusted marker (schemaVersion 2,
- * scoredBy "server"), passes validateTrustedAttempt, AND the caller knows the record was written
- * by the server (e.g. the marker was present on the Firestore parent document, which clients can
- * never write). A marker found anywhere else (local storage, inside attemptJson) proves nothing.
+ * Trust model: a trusted marker (schemaVersion 2, scoredBy "server") on its own proves nothing,
+ * wherever it is found. An attempt is *verified* only by comparing it with server-originated
+ * evidence (see AttemptProvenance) and validating it; there is no caller-supplied "trusted" flag.
  */
 
 export const ATTEMPT_LIMITS = Object.freeze({
@@ -36,6 +42,39 @@ const OUTCOMES: readonly ResponseOutcome[] = ['correct', 'incorrect', 'unanswere
 const MODES = ['diagnostic', 'adaptive', 'jee_simulator'];
 /** Sources whose content lives in the question bank (possibly licensed): never embedded in attempts. */
 const BANK_SOURCES: readonly QuestionSource[] = ['pyq', 'curated'];
+/**
+ * Keys that carry question content, explanations or answer keys. By-reference attempts must not
+ * contain any of them at any depth (the review is fetched through an authorised request).
+ */
+const CONTENT_KEYS = new Set([
+  'question',
+  'stem',
+  'options',
+  'explanation',
+  'solution',
+  'sourceQuote',
+  'correctIndex',
+  'correctOptionId',
+  'correctOptionIds',
+  'acceptedIntegers',
+  'answerKey',
+]);
+
+/** Paths of content-bearing keys anywhere inside `value` (the top-level `questions` list must be empty instead). */
+export function findContentKeys(value: unknown, path = ''): string[] {
+  if (!value || typeof value !== 'object') return [];
+  const found: string[] = [];
+  if (Array.isArray(value)) {
+    value.forEach((item, i) => found.push(...findContentKeys(item, `${path}[${i}]`)));
+    return found;
+  }
+  for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+    const here = path ? `${path}.${key}` : key;
+    if (CONTENT_KEYS.has(key)) found.push(here);
+    found.push(...findContentKeys(child, here));
+  }
+  return found;
+}
 
 function isSafeRef(value: unknown): value is string {
   return (
@@ -73,15 +112,17 @@ export function validateAttemptContext(raw: unknown): string[] {
     const extra = hasOnlyKeys(ctx, ['type', 'examType', 'syllabusId', 'syllabusRevision', 'subjectId', 'chapterId', 'topicIds']);
     if (extra.length) errors.push(`syllabus context has unexpected fields: ${extra.join(', ')}.`);
     if (!EXAM_TYPES.includes(ctx.examType as ExamTypeId)) errors.push('syllabus context needs a known examType.');
-    const syllabus = getSyllabus(ctx.syllabusId);
-    if (!syllabus) {
+    if (!isRegisteredSyllabusId(ctx.syllabusId)) {
       errors.push('syllabus context references an unknown syllabusId.');
       return errors;
     }
-    if (syllabus.examType !== ctx.examType) errors.push(`syllabus ${syllabus.id} belongs to exam ${syllabus.examType}, not ${String(ctx.examType)}.`);
-    if (!Number.isInteger(ctx.syllabusRevision) || !syllabus.supportedRevisions.includes(ctx.syllabusRevision as number)) {
-      errors.push(`syllabus context needs a supported syllabusRevision for ${syllabus.id}.`);
+    // Always the exact revision the attempt was made against; never the latest one.
+    const syllabus = getSyllabusRevision(ctx.syllabusId, ctx.syllabusRevision);
+    if (!syllabus) {
+      errors.push(`syllabus context needs a registered syllabusRevision for ${String(ctx.syllabusId)}.`);
+      return errors;
     }
+    if (syllabus.examType !== ctx.examType) errors.push(`syllabus ${syllabus.id} belongs to exam ${syllabus.examType}, not ${String(ctx.examType)}.`);
     const subject = findSyllabusSubject(syllabus, ctx.subjectId);
     if (!subject) errors.push('syllabus context references an unknown subjectId.');
     const chapter = findSyllabusChapter(syllabus, ctx.chapterId);
@@ -193,7 +234,7 @@ export function validateTrustedAttempt(raw: unknown): string[] {
     ids.add(o.questionId);
     for (const t of o.topicIds) if (!isRegisteredTopicId(t)) err(`outcome topicId "${String(t)}" is not in a registered syllabus.`);
     if (context?.type === 'syllabus') {
-      const syllabus = getSyllabus(context.syllabusId)!;
+      const syllabus = getSyllabusRevision(context.syllabusId, context.syllabusRevision)!;
       if (o.topicIds.length === 0) err(`question ${o.questionId} needs at least one topicId.`);
       const allowed = context.topicIds.length > 0 ? new Set(context.topicIds) : null;
       for (const t of o.topicIds) {
@@ -239,8 +280,10 @@ export function validateTrustedAttempt(raw: unknown): string[] {
   const usesBank = Array.isArray(a.sources) && a.sources.some((s: QuestionSource) => BANK_SOURCES.includes(s));
   if (a.reviewMode !== 'embedded' && a.reviewMode !== 'by_reference') err('reviewMode must be "embedded" or "by_reference".');
   else if (usesBank && a.reviewMode !== 'by_reference') err('bank/PYQ attempts must use reviewMode "by_reference".');
-  if (a.reviewMode === 'by_reference' && (!Array.isArray(a.questions) || a.questions.length > 0)) {
-    err('by_reference attempts must not embed question content.');
+  if (a.reviewMode === 'by_reference') {
+    if (!Array.isArray(a.questions) || a.questions.length > 0) err('by_reference attempts must not embed question content.');
+    const leaked = findContentKeys({ ...a, questions: [] });
+    if (leaked.length > 0) err(`by_reference attempts must not contain question content or answer keys (${leaked.slice(0, 5).join(', ')}).`);
   }
   if (a.reviewMode === 'embedded') {
     if (!Array.isArray(a.questions) || a.questions.length !== outcomes.length) err('embedded attempts must include every reviewed question.');
@@ -256,7 +299,43 @@ export function validateTrustedAttempt(raw: unknown): string[] {
   return errors;
 }
 
-/** Verified only when the record is valid AND it is known to have been written by the server. */
-export function isVerifiedAttempt(attempt: unknown, options: { writtenByServer: boolean }): boolean {
-  return options.writtenByServer && validateTrustedAttempt(attempt).length === 0;
+/**
+ * Server-originated evidence an attempt can be checked against. Only sources that clients cannot
+ * write qualify. Currently: the server-held question set (questionSets/{id}; denied to clients by
+ * the rules), whose recorded submission is the authoritative result. The Firestore attempt record
+ * becomes evidence only once the rules reserve it for the server (Stage D) and the client
+ * compares against it (Stage C).
+ */
+export type AttemptProvenance = {
+  source: 'question_set_submission';
+  set: { id: string; uid: string; submission?: { attempt?: unknown } | null };
+};
+
+function sameJson(a: unknown, b: unknown): boolean {
+  const canon = (v: unknown): unknown =>
+    Array.isArray(v)
+      ? v.map(canon)
+      : v && typeof v === 'object'
+        ? Object.fromEntries(
+            Object.entries(v as Record<string, unknown>)
+              .filter(([, x]) => x !== undefined)
+              .sort(([x], [y]) => (x < y ? -1 : x > y ? 1 : 0))
+              .map(([k, x]) => [k, canon(x)])
+          )
+        : v;
+  return JSON.stringify(canon(a)) === JSON.stringify(canon(b));
+}
+
+/**
+ * Verified only when the attempt is a valid trusted attempt AND it is exactly the result recorded
+ * in server-originated evidence for that question set. Markers, flags or booleans supplied with
+ * the attempt itself are never sufficient.
+ */
+export function isVerifiedAttempt(attempt: unknown, provenance: AttemptProvenance): boolean {
+  if (!provenance || provenance.source !== 'question_set_submission' || !provenance.set) return false;
+  const recorded = provenance.set.submission?.attempt;
+  if (!recorded || !attempt || typeof attempt !== 'object') return false;
+  const a = attempt as Record<string, unknown>;
+  if (a.questionSetId !== provenance.set.id || a.id !== trustedAttemptIdFor(provenance.set.id)) return false;
+  return validateTrustedAttempt(recorded).length === 0 && sameJson(recorded, attempt);
 }

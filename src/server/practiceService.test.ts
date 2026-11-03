@@ -133,12 +133,12 @@ test('question sets are private to their owner, expire, and accept one submissio
   const second = gradeSubmission(set, { [set.questions[0].id]: { type: 'mcq', optionId: 'D' } });
   assert.ok(first.ok && second.ok);
   if (!first.ok || !second.ok) return;
-  const r1 = await store.recordSubmission('alice', set.id, { submittedAt: 't1', attempt: first.attempt });
-  const r2 = await store.recordSubmission('alice', set.id, { submittedAt: 't2', attempt: second.attempt });
+  const r1 = await store.recordSubmission('alice', set.id, { submittedAt: '2026-11-03T10:01:00.000Z', attempt: first.attempt });
+  const r2 = await store.recordSubmission('alice', set.id, { submittedAt: '2026-11-03T10:02:00.000Z', attempt: second.attempt });
   assert.equal(r1?.alreadySubmitted, false);
   assert.equal(r2?.alreadySubmitted, true);
   assert.equal(r2?.submission.attempt.score, first.attempt.score, 'resubmission cannot change the result');
-  assert.equal(await store.recordSubmission('bob', set.id, { submittedAt: 't3', attempt: second.attempt }), null);
+  assert.equal(await store.recordSubmission('bob', set.id, { submittedAt: '2026-11-03T10:03:00.000Z', attempt: second.attempt }), null);
 });
 
 test('production without credentials fails closed for practice sets', async () => {
@@ -159,6 +159,6 @@ test('Firestore question-set store enforces ownership and single submission', as
   const graded = gradeSubmission(set, {});
   assert.ok(graded.ok);
   if (!graded.ok) return;
-  assert.equal((await store.recordSubmission('alice', set.id, { submittedAt: 't', attempt: graded.attempt }))?.alreadySubmitted, false);
-  assert.equal((await store.recordSubmission('alice', set.id, { submittedAt: 't', attempt: graded.attempt }))?.alreadySubmitted, true);
+  assert.equal((await store.recordSubmission('alice', set.id, { submittedAt: '2026-11-03T10:05:00.000Z', attempt: graded.attempt }))?.alreadySubmitted, false);
+  assert.equal((await store.recordSubmission('alice', set.id, { submittedAt: '2026-11-03T10:05:00.000Z', attempt: graded.attempt }))?.alreadySubmitted, true);
 });

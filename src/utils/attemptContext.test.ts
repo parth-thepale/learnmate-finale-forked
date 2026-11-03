@@ -1,12 +1,21 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { findSyllabusChapter, getSyllabus, isRegisteredTopicId, SYLLABUS_REGISTRY } from '../data/syllabusRegistry';
+import { createHash } from 'crypto';
+import {
+  findSyllabusChapter,
+  getCurrentSyllabus,
+  getSyllabusRevision,
+  isRegisteredTopicId,
+  syllabusIdLines,
+  SYLLABUS_REGISTRY,
+} from '../data/syllabusRegistry';
 import { JEE_MAIN_SYLLABUS } from '../data/jeeMainSyllabus';
 import { createAiPracticeSet, gradeSubmission } from '../server/practiceService';
 import { newQuestionSetId } from '../server/questionSetStore';
 import type { SyllabusAttemptContext } from '../types/questionBank';
 import type { ValidatedGeneratedMcq } from './questionValidation';
 import {
+  findContentKeys,
   isVerifiedAttempt,
   resolveAttemptContext,
   TRUSTED_ATTEMPT_ID_PREFIX,
@@ -41,33 +50,31 @@ const generated: ValidatedGeneratedMcq[] = [
 
 /** A trusted attempt as the current server grader builds it, plus the Stage A fields. */
 function trustedAttempt(kind: 'syllabus' | 'document' = 'syllabus') {
-  const base = createAiPracticeSet({ setId: newQuestionSetId(), uid: 'alice', mode: 'adaptive', documentId: kind === 'document' ? 'doc-17300' : '', documentTitle: kind === 'document' ? 'Mechanics notes' : 'Physics · Kinematics', questions: generated });
-  // createAiPracticeSet still substitutes 'unknown' for a missing documentId (removed in Stage B).
   const set =
     kind === 'syllabus'
-      ? { ...base, documentId: '', questions: base.questions.map((q) => ({ ...q, topicIds: [KIN_T1], chapterId: KIN })) }
-      : base;
+      ? createAiPracticeSet({ setId: newQuestionSetId(), uid: 'alice', mode: 'adaptive', context: syllabusContext(), questions: generated.map((q) => ({ ...q, topicIds: [KIN_T1] })) })
+      : createAiPracticeSet({ setId: newQuestionSetId(), uid: 'alice', mode: 'adaptive', documentId: 'doc-17300', documentTitle: 'Mechanics notes', questions: generated });
   const graded = gradeSubmission(set, {
     [set.questions[0].id]: { type: 'mcq', optionId: 'B' }, // correct
     [set.questions[1].id]: { type: 'mcq', optionId: 'A' }, // incorrect
   });
   assert.ok(graded.ok);
   if (!graded.ok) throw new Error('unreachable');
-  return {
-    ...graded.attempt,
-    marking: { ...JEE_MAIN_MARKING },
-    reviewMode: 'embedded' as const,
-    context: kind === 'syllabus' ? syllabusContext() : { type: 'document' as const, documentId: 'doc-17300', documentTitle: 'Mechanics notes' },
-  };
+  // Grading now fills in context, marking and reviewMode itself.
+  assert.deepEqual(graded.attempt.marking, JEE_MAIN_MARKING);
+  assert.equal(graded.attempt.reviewMode, 'embedded');
+  return graded.attempt;
 }
 
 test('syllabus registry exposes JEE Main 2026 by plain string ids', () => {
   assert.deepEqual(SYLLABUS_REGISTRY.map((s) => [s.id, s.examType, s.revision]), [['jee_main_2026', 'jee_main', 1]]);
-  const jee = getSyllabus('jee_main_2026')!;
-  assert.equal(jee.subjects, JEE_MAIN_SYLLABUS, 'wraps the existing syllabus data, unchanged');
+  const jee = getCurrentSyllabus('jee_main_2026')!;
+  assert.equal(getSyllabusRevision('jee_main_2026', 1), jee);
+  assert.equal(getSyllabusRevision('jee_main_2026', 2), undefined, 'never falls back to another revision');
+  assert.deepEqual(syllabusIdLines(jee), syllabusIdLines({ subjects: JEE_MAIN_SYLLABUS }), 'revision 1 mirrors the syllabus data');
   assert.equal(findSyllabusChapter(jee, KIN)?.subjectId, 'physics');
   assert.equal(jee.source.groupingReview, 'pending_owner_review');
-  assert.equal(getSyllabus('neet_ug_2026'), undefined, 'nothing is registered without a verified source');
+  assert.equal(getCurrentSyllabus('neet_ug_2026'), undefined, 'nothing is registered without a verified source');
   assert.equal(isRegisteredTopicId(KIN_T1), true);
   assert.equal(isRegisteredTopicId('physics.kinematics.made-up'), false);
 });
@@ -92,8 +99,8 @@ test('syllabus contexts need a registered exam, syllabus, revision, subject and 
     ['unknown syllabus', syllabusContext({ syllabusId: 'jee_main_2099' }), /unknown syllabusId/],
     ['exam mismatch', syllabusContext({ examType: 'neet_ug' }), /belongs to exam jee_main/],
     ['unknown exam', syllabusContext({ examType: 'olympiad' as never }), /known examType/],
-    ['unsupported revision', syllabusContext({ syllabusRevision: 2 }), /supported syllabusRevision/],
-    ['non-integer revision', syllabusContext({ syllabusRevision: 1.5 }), /supported syllabusRevision/],
+    ['unregistered revision', syllabusContext({ syllabusRevision: 2 }), /registered syllabusRevision/],
+    ['non-integer revision', syllabusContext({ syllabusRevision: 1.5 }), /registered syllabusRevision/],
     ['unknown subject', syllabusContext({ subjectId: 'biology' }), /unknown subjectId/],
     ['unknown chapter', syllabusContext({ chapterId: 'physics.nope' }), /unknown chapterId/],
     ['chapter outside subject', syllabusContext({ subjectId: 'chemistry' }), /does not belong to subjectId/],
@@ -197,11 +204,42 @@ test('the marking snapshot drives marks, so other registered schemes validate th
   assert.ok(validateTrustedAttempt({ ...plain, rawMarks: 3 }).length > 0);
 });
 
-test('verification requires both a valid trusted record and proof it was written by the server', () => {
+test('registered syllabus revisions are immutable: frozen snapshots pinned by an id fingerprint', () => {
+  for (const syllabus of SYLLABUS_REGISTRY) {
+    const digest = createHash('sha256').update(syllabusIdLines(syllabus).join('\n')).digest('hex');
+    assert.equal(digest, syllabus.idsFingerprint, `${syllabus.id} r${syllabus.revision}: ids changed; register a new revision instead`);
+    assert.ok(Object.isFrozen(syllabus) && Object.isFrozen(syllabus.subjects));
+    const chapter = syllabus.subjects[0].chapters[0];
+    assert.ok(Object.isFrozen(chapter) && Object.isFrozen(chapter.topics) && Object.isFrozen(chapter.topics[0]));
+    assert.throws(() => {
+      (chapter.topics as Array<{ id: string; name: string }>).push({ id: 'x', name: 'x' });
+    });
+  }
+  assert.notEqual(getCurrentSyllabus('jee_main_2026')!.subjects, JEE_MAIN_SYLLABUS, 'a snapshot, not the editable source data');
+});
+
+test('by_reference attempts may not contain question content or answer keys at any depth', () => {
+  const base = { ...trustedAttempt(), sources: ['curated'], reviewMode: 'by_reference', questions: [] };
+  assert.deepEqual(validateTrustedAttempt(base), []);
+  const nested = { ...base, answers: base.answers.map((a, i) => (i === 0 ? { ...a, explanation: 'leaked' } : a)) };
+  assert.ok(validateTrustedAttempt(nested).some((e) => /answers\[0\]\.explanation/.test(e)));
+  const keyInOutcome = { ...base, outcomes: base.outcomes.map((o, i) => (i === 1 ? { ...o, correctOptionId: 'B' } : o)) };
+  assert.ok(validateTrustedAttempt(keyInOutcome).some((e) => /correctOptionId/.test(e)));
+  const deep = { ...base, context: { ...base.context }, extra: { review: [{ stem: 'x' }] } };
+  assert.deepEqual(findContentKeys(deep).filter((k) => k.includes('stem')), ['extra.review[0].stem']);
+});
+
+test('verification compares against server-held evidence; markers and booleans alone are never enough', () => {
   const attempt = trustedAttempt();
-  assert.equal(isVerifiedAttempt(attempt, { writtenByServer: true }), true);
-  assert.equal(isVerifiedAttempt(attempt, { writtenByServer: false }), false, 'a marker held only by the client proves nothing');
-  assert.equal(isVerifiedAttempt({ ...attempt, score: 3 }, { writtenByServer: true }), false);
+  const set = { id: attempt.questionSetId, uid: 'alice', submission: { attempt: structuredClone(attempt) } };
+  assert.equal(isVerifiedAttempt(attempt, { source: 'question_set_submission', set }), true);
+  assert.equal(isVerifiedAttempt({ ...attempt, rawMarks: 12, score: 3 }, { source: 'question_set_submission', set }), false, 'differs from the recorded result');
+  assert.equal(isVerifiedAttempt(attempt, { source: 'question_set_submission', set: { ...set, submission: null } }), false, 'nothing recorded');
+  assert.equal(isVerifiedAttempt(attempt, { source: 'question_set_submission', set: { ...set, id: 'qs_' + 'f'.repeat(32) } }), false, 'another set');
+  const tamperedRecord = { ...set, submission: { attempt: { ...attempt, score: 3 } } };
+  assert.equal(isVerifiedAttempt({ ...attempt, score: 3 }, { source: 'question_set_submission', set: tamperedRecord }), false, 'an invalid record proves nothing');
+  assert.equal(isVerifiedAttempt(attempt, { writtenByServer: true } as never), false, 'a caller-supplied flag is ignored');
+  assert.equal(isVerifiedAttempt(attempt, undefined as never), false);
   const legacy = { id: 'quiz-1', documentId: 'doc-1', documentTitle: 'N', mode: 'diagnostic', score: 5, totalQuestions: 5, percentage: 100 };
-  assert.equal(isVerifiedAttempt(legacy, { writtenByServer: true }), false, 'v1 attempts are never verified');
+  assert.equal(isVerifiedAttempt(legacy, { source: 'question_set_submission', set }), false, 'v1 attempts are never verified');
 });

@@ -10,7 +10,9 @@ import type { QuotaFirestore, QuotaTransaction } from './quotaStore';
 export class StrictFakeFirestore implements QuotaFirestore {
   readonly docs = new Map<string, Record<string, unknown>>();
   /** Every successful write, in order (deep copies). */
-  readonly writes: Array<{ path: string; data: Record<string, unknown> }> = [];
+  readonly writes: Array<{ path: string; data: Record<string, unknown> | null }> = [];
+  /** Committed transactions (a rejected or failed transaction commits nothing). */
+  commits = 0;
   failNext: false | string = false;
   private queue: Promise<unknown> = Promise.resolve();
 
@@ -25,7 +27,7 @@ export class StrictFakeFirestore implements QuotaFirestore {
         this.failNext = false;
         throw new Error(message);
       }
-      const staged: Array<[string, Record<string, unknown>]> = [];
+      const staged: Array<[string, Record<string, unknown> | null]> = [];
       const tx: QuotaTransaction = {
         get: async (ref) => {
           const data = this.docs.get(ref as string);
@@ -36,12 +38,17 @@ export class StrictFakeFirestore implements QuotaFirestore {
           assertFirestoreValue(data);
           staged.push([ref as string, structuredClone(data)]);
         },
+        delete: (ref) => {
+          staged.push([ref as string, null]);
+        },
       };
       const result = await fn(tx);
       for (const [path, data] of staged) {
-        this.docs.set(path, data);
-        this.writes.push({ path, data: structuredClone(data) });
+        if (data === null) this.docs.delete(path);
+        else this.docs.set(path, data);
+        this.writes.push({ path, data: data === null ? null : structuredClone(data) });
       }
+      if (staged.length > 0) this.commits++;
       return result;
     };
     const next = this.queue.then(run, run);

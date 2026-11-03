@@ -49,6 +49,9 @@ function gradedAttempt() {
     documentId: 'doc-1',
     documentTitle: 'Mechanics notes',
     sources: ['ai'],
+    context: { type: 'document', documentId: 'doc-1', documentTitle: 'Mechanics notes' },
+    marking: { id: 'jee_main_2026', correct: 4, incorrect: -1, unanswered: 0 },
+    reviewMode: 'embedded',
     reviewQuestions: [
       { id: 'q1', question: 'Q', options: ['a', 'b', 'c', 'd'], correctIndex: 1, explanation: 'e', topic: 'Kinematics', sourcePage: 1, sourceQuote: 'x', difficulty: 'easy' },
     ] as never,

@@ -60,25 +60,19 @@ import {
 import { QuotaUnavailableError, type DailyQuotaStore } from './src/server/quotaStore.ts';
 import { FixedWindowRateLimiter } from './src/server/rateLimiter.ts';
 import { REQUEST_LIMITS } from './src/server/requestValidation.ts';
-import { newQuestionSetId, type StoredQuestionSet } from './src/server/questionSetStore.ts';
+import type { StoredQuestionSet } from './src/server/questionSetStore.ts';
+import { MIN_PRACTICE_QUESTIONS, registerPracticeRoutes, type QuizGenerator } from './src/server/practiceRoutes.ts';
 import {
   validateGeneratedMcqSet,
   type GeneratedMcqInput,
-  type ValidatedGeneratedMcq,
 } from './src/utils/questionValidation.ts';
-import {
-  collectMistakeInputs,
-  createAiPracticeSet,
-  gradeSubmission,
-  toPublicPracticeQuestion,
-} from './src/server/practiceService.ts';
+import { collectMistakeInputs } from './src/server/practiceService.ts';
 import { loadVerifiedQuestionBank } from './src/server/questionBankLoader.ts';
 import { canOfferFullLengthMock } from './src/utils/questionBank.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const MIN_PRACTICE_QUESTIONS = 5;
 const MISCONCEPTION_UNAVAILABLE =
   'A detailed misconception analysis is not available for this question right now. Compare your answer with the explanation below.';
 
@@ -1632,33 +1626,9 @@ Follow these exact rules for Hybrid Knowledge Answering:
 
   // 3. Generate a Diagnostic or Adaptive practice set. Answer keys stay on the server; the client
   //    receives questions only and submits answers to /api/practice/submit for grading.
-  app.post('/api/study/quiz', async (req, res) => {
-    const uid = req.authUser?.uid;
-    if (!uid) {
-      res.status(401).json({ error: 'Please sign in to practise.', code: 'auth_required' });
-      return;
-    }
-    const {
-      documentId = '',
-      title,
-      pages = [],
-      topics = [],
-      mode = 'diagnostic',
-      focusTopics = [],
-      questionCount = 6,
-      forceRefresh = false,
-    } = req.body as {
-      documentId?: string;
-      title?: string;
-      pages?: PageInput[];
-      topics?: TopicInput[];
-      mode?: 'diagnostic' | 'adaptive';
-      focusTopics?: string[];
-      questionCount?: number;
-      forceRefresh?: boolean;
-    };
-
-    const clampedCount = Math.max(MIN_PRACTICE_QUESTIONS, Math.min(30, Number(questionCount) || 6));
+  // AI question generation for document practice (Gemini). Request handling, storage and
+  // grading live in src/server/practiceRoutes.ts so they can be tested behind the real middleware.
+  const generatePracticeQuiz: QuizGenerator = async ({ mode, title, pages, topics, focusTopics, questionCount: clampedCount, forceRefresh }) => {
     const validPageNumbers = new Set(pages.map((p) => p.pageNumber));
     const contextText = formatPagesContext(pages);
 
@@ -1667,17 +1637,14 @@ Follow these exact rules for Hybrid Knowledge Answering:
         ? `This is an ADAPTIVE PRACTICE quiz. Focus all ${clampedCount} questions specifically on these topics the student recently answered incorrectly: ${focusTopics.join(', ')}. Test conceptual understanding from new angles.`
         : `This is a DIAGNOSTIC QUIZ. Generate ${clampedCount} multiple-choice questions spanning across the key topics in the material (${topics.map((t) => t.name).join(', ') || 'all pages'}).`;
 
-    let validQuestions: ValidatedGeneratedMcq[];
-    let rejectedCount = 0;
-    try {
-      const { data: parsed } = await generateStructuredJson<{ questions: GeneratedMcqInput[] }>({
-        operation: `study_quiz_${mode}_${clampedCount}`,
-        bypassCache: Boolean(forceRefresh),
-        validate: (data) => {
-          const { valid } = validateGeneratedMcqSet(data?.questions, { validPageNumbers });
-          if (valid.length < MIN_PRACTICE_QUESTIONS) throw new Error('INSUFFICIENT_VALID_QUESTIONS');
-        },
-        systemInstruction: `You are LearnMate's assessment generator.
+    const { data: parsed } = await generateStructuredJson<{ questions: GeneratedMcqInput[] }>({
+      operation: `study_quiz_${mode}_${clampedCount}`,
+      bypassCache: Boolean(forceRefresh),
+      validate: (data) => {
+        const { valid } = validateGeneratedMcqSet(data?.questions, { validPageNumbers });
+        if (valid.length < MIN_PRACTICE_QUESTIONS) throw new Error('INSUFFICIENT_VALID_QUESTIONS');
+      },
+      systemInstruction: `You are LearnMate's assessment generator.
 Generate ${clampedCount} grounded Multiple-Choice Questions (MCQs) strictly derived from the provided Study Material Pages.
 Rules:
 - Every question MUST have exactly 4 distinct options with exactly one correct option.
@@ -1687,139 +1654,51 @@ Rules:
 - "sourceQuote" MUST be a brief quote or formula from that page supporting the answer.
 - "explanation" MUST explain why the correct option is right.
 - ${focusInstruction}`,
-        prompt: `Document: ${title || 'Study Material'}\n\nStudy Material Pages:\n${contextText}`,
-        responseSchema: {
-          type: Type.OBJECT,
-          properties: {
-            questions: {
-              type: Type.ARRAY,
-              items: {
-                type: Type.OBJECT,
-                properties: {
-                  topic: { type: Type.STRING },
-                  question: { type: Type.STRING },
-                  options: {
-                    type: Type.ARRAY,
-                    items: { type: Type.STRING },
-                  },
-                  correctIndex: { type: Type.INTEGER },
-                  explanation: { type: Type.STRING },
-                  sourcePage: { type: Type.INTEGER },
-                  sourceQuote: { type: Type.STRING },
-                  difficulty: { type: Type.STRING },
+      prompt: `Document: ${title || 'Study Material'}\n\nStudy Material Pages:\n${contextText}`,
+      responseSchema: {
+        type: Type.OBJECT,
+        properties: {
+          questions: {
+            type: Type.ARRAY,
+            items: {
+              type: Type.OBJECT,
+              properties: {
+                topic: { type: Type.STRING },
+                question: { type: Type.STRING },
+                options: {
+                  type: Type.ARRAY,
+                  items: { type: Type.STRING },
                 },
-                required: [
-                  'topic',
-                  'question',
-                  'options',
-                  'correctIndex',
-                  'explanation',
-                  'sourcePage',
-                  'sourceQuote',
-                  'difficulty',
-                ],
+                correctIndex: { type: Type.INTEGER },
+                explanation: { type: Type.STRING },
+                sourcePage: { type: Type.INTEGER },
+                sourceQuote: { type: Type.STRING },
+                difficulty: { type: Type.STRING },
               },
+              required: [
+                'topic',
+                'question',
+                'options',
+                'correctIndex',
+                'explanation',
+                'sourcePage',
+                'sourceQuote',
+                'difficulty',
+              ],
             },
           },
-          required: ['questions'],
         },
-      });
-      const result = validateGeneratedMcqSet(parsed.questions, { validPageNumbers });
-      validQuestions = result.valid.slice(0, clampedCount);
-      rejectedCount = result.rejected.length;
-    } catch (err) {
-      // No fallback quiz: an unreliable quiz is worse than an honest failure.
-      const notice = extractAiNotice(err);
-      res.status(503).json({
-        error: "We couldn't generate a reliable quiz right now. Please try again in a moment.",
-        code: 'question_generation_failed',
-        aiStatus: notice.aiStatus,
-      });
-      return;
-    }
-
-    const storedSet = createAiPracticeSet({
-      setId: newQuestionSetId(),
-      uid,
-      mode,
-      documentId,
-      documentTitle: title || 'Study Material',
-      focusTopics,
-      questions: validQuestions,
+        required: ['questions'],
+      },
     });
+    const result = validateGeneratedMcqSet(parsed.questions, { validPageNumbers });
+    return { valid: result.valid.slice(0, clampedCount), rejectedCount: result.rejected.length };
+  };
 
-    try {
-      await questionSetStore.create(storedSet);
-    } catch (err) {
-      console.warn('[practice] could not store question set:', err instanceof Error ? err.message : err);
-      res.status(503).json({
-        error: 'Practice is temporarily unavailable. Please try again shortly.',
-        code: 'practice_unavailable',
-      });
-      return;
-    }
-
-    res.json({
-      setId: storedSet.id,
-      expiresAt: storedSet.expiresAt,
-      source: 'ai',
-      requestedCount: clampedCount,
-      rejectedCount,
-      questions: storedSet.questions.map(toPublicPracticeQuestion),
-    });
-  });
-
-  // 3b. Grade a submitted practice set on the server. Submissions are recorded once per set.
-  app.post('/api/practice/submit', async (req, res) => {
-    const uid = req.authUser?.uid;
-    if (!uid) {
-      res.status(401).json({ error: 'Please sign in to practise.', code: 'auth_required' });
-      return;
-    }
-    const { setId, responses = {} } = req.body as {
-      setId: string;
-      responses?: Record<string, unknown>;
-    };
-
-    let storedSet: StoredQuestionSet | null;
-    try {
-      storedSet = await questionSetStore.get(uid, setId);
-    } catch {
-      res.status(503).json({ error: 'Practice is temporarily unavailable. Please try again shortly.', code: 'practice_unavailable' });
-      return;
-    }
-    if (!storedSet) {
-      res.status(404).json({
-        error: 'This practice set has expired or could not be found. Please start a new one.',
-        code: 'set_not_found',
-      });
-      return;
-    }
-    if (storedSet.submission) {
-      res.json({ attempt: storedSet.submission.attempt, alreadySubmitted: true });
-      return;
-    }
-
-    const graded = gradeSubmission(storedSet, responses);
-    if (!graded.ok) {
-      res.status(graded.status).json({ error: graded.error, code: 'invalid_request' });
-      return;
-    }
-    const attempt = graded.attempt;
-
-    try {
-      const recorded = await questionSetStore.recordSubmission(uid, storedSet.id, {
-        submittedAt: attempt.completedAt,
-        attempt,
-      });
-      if (!recorded) {
-        res.status(404).json({ error: 'This practice set has expired. Please start a new one.', code: 'set_not_found' });
-        return;
-      }
-      res.json({ attempt: recorded.submission.attempt, alreadySubmitted: recorded.alreadySubmitted });
-    } catch {
-      res.status(503).json({ error: 'Your answers could not be saved. Please try submitting again.', code: 'practice_unavailable' });
-    }
+  registerPracticeRoutes(app, {
+    questionSetStore,
+    generateQuiz: generatePracticeQuiz,
+    describeGenerationFailure: (err) => ({ aiStatus: extractAiNotice(err).aiStatus }),
   });
 
   // 4. Mistake analysis & revision plan for a server-graded practice set. Which answers were wrong
