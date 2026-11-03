@@ -2,6 +2,8 @@ import { initializeApp } from 'firebase/app';
 import {
   getAuth,
   initializeAuth,
+  indexedDBLocalPersistence,
+  browserLocalPersistence,
   inMemoryPersistence,
   browserPopupRedirectResolver,
   GoogleAuthProvider,
@@ -19,44 +21,30 @@ import {
 } from 'firebase/firestore';
 import firebaseConfig from '../firebase-applet-config.json';
 
-/**
- * Purges any stale or expired persisted Firebase Auth tokens from localStorage,
- * sessionStorage, and IndexedDB so that expired tokens from prior sessions never
- * trigger failing securetoken.googleapis.com refresh calls on startup.
- */
-function clearStaleFirebaseAuthStorage(): void {
+import { removeForeignFirebaseAuthEntries } from './services/authStorageHygiene';
+
+function cleanUpForeignAuthSessions(): void {
   if (typeof window === 'undefined') return;
-  try {
-    for (const storage of [window.localStorage, window.sessionStorage]) {
-      if (!storage) continue;
-      const keysToRemove: string[] = [];
-      for (let i = 0; i < storage.length; i++) {
-        const key = storage.key(i);
-        if (key && key.startsWith('firebase:')) {
-          keysToRemove.push(key);
-        }
-      }
-      for (const key of keysToRemove) {
-        storage.removeItem(key);
-      }
+  for (const storage of [window.localStorage, window.sessionStorage]) {
+    try {
+      if (storage) removeForeignFirebaseAuthEntries(storage, firebaseConfig.apiKey);
+    } catch {
+      // ignore in restricted storage environments
     }
-    if (window.indexedDB && typeof window.indexedDB.deleteDatabase === 'function') {
-      window.indexedDB.deleteDatabase('firebaseLocalStorageDb');
-    }
-  } catch {
-    // ignore in restricted storage environments
   }
 }
 
-clearStaleFirebaseAuthStorage();
+cleanUpForeignAuthSessions();
 
 const app = initializeApp(firebaseConfig);
 
 function createSafeAuth(): Auth {
   if (typeof window !== 'undefined') {
     try {
+      // Keep users signed in across reloads. The SDK uses the first persistence the browser
+      // supports and falls back to in-memory (e.g. storage blocked in private mode).
       return initializeAuth(app, {
-        persistence: inMemoryPersistence,
+        persistence: [indexedDBLocalPersistence, browserLocalPersistence, inMemoryPersistence],
         popupRedirectResolver: browserPopupRedirectResolver,
       });
     } catch {
@@ -181,7 +169,6 @@ export async function signInWithGoogle(): Promise<User | null> {
 }
 
 export async function signOutUser(): Promise<void> {
-  clearStaleFirebaseAuthStorage();
   await firebaseSignOut(auth);
 }
 

@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { Navbar, ActiveTab } from './components/Navbar';
 import { HomeView } from './components/HomeView';
 import { StudyView, StudySubMode } from './components/StudyView';
@@ -20,16 +20,30 @@ import {
   StudentAcademicProfile
 } from './types/study';
 import { studyStorage } from './services/storageService';
+import { createFirestoreCloudStore } from './services/firestoreCloudStore';
+import type { SyncSnapshot } from './services/syncStatus';
 import { extractPagesFromPdf } from './utils/pdfExtractor';
 import { aiStudyClient } from './services/aiClient';
 import { splitTextIntoPages } from './utils/quizGrading';
 import {
   auth,
+  db,
   signInWithGoogle,
   signOutUser,
   onAuthStateChanged,
   User
 } from './firebase';
+
+studyStorage.attachCloudStore(createFirestoreCloudStore(db));
+
+function sameSyncSnapshot(a: SyncSnapshot, b: SyncSnapshot): boolean {
+  return (
+    a.state === b.state &&
+    a.pendingWrites === b.pendingWrites &&
+    a.unsyncedChanges === b.unsyncedChanges &&
+    a.lastError === b.lastError
+  );
+}
 
 const VALID_TABS: ActiveTab[] = [
   'dashboard',
@@ -84,6 +98,11 @@ export function App() {
   const [user, setUser] = useState<User | null>(null);
   const [isAuthReady, setIsAuthReady] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
+  const [syncSnapshot, setSyncSnapshot] = useState<SyncSnapshot>(() => studyStorage.getSyncSnapshot());
+  // Bumped whenever the local account scope changes so that every data view remounts and no
+  // state from the previous account survives on screen.
+  const [scopeEpoch, setScopeEpoch] = useState(0);
+  const authUidRef = useRef<string | null>(null);
 
   const effectiveDoc = activeDoc || documents[0] || studyStorage.getDocuments()[0];
 
@@ -108,38 +127,88 @@ export function App() {
     return () => window.removeEventListener('hashchange', onHashChange);
   }, []);
 
-  useEffect(() => {
+  const loadStateFromStorage = useCallback(() => {
     const docs = studyStorage.getDocuments();
     setDocuments(docs);
     const activeId = studyStorage.getActiveDocumentId();
-    const initialDoc = docs.find((d) => d.id === activeId) || docs[0] || null;
-    setActiveDoc(initialDoc);
+    setActiveDoc(docs.find((d) => d.id === activeId) || docs[0] || null);
     setNotifications(studyStorage.getNotifications());
     setStudentProfile(studyStorage.getStudentProfile());
+  }, []);
 
-    const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
+  useEffect(() => {
+    const unsubscribeStorage = studyStorage.subscribe(() => {
+      const next = studyStorage.getSyncSnapshot();
+      setSyncSnapshot((prev) => (sameSyncSnapshot(prev, next) ? prev : next));
+    });
+
+    const unsubscribeAuth = onAuthStateChanged(auth, (currentUser) => {
+      const previousScope = studyStorage.getActiveScope();
+      studyStorage.activateAccount(currentUser);
+      authUidRef.current = currentUser?.uid ?? null;
+      if (studyStorage.getActiveScope() !== previousScope) {
+        setScopeEpoch((epoch) => epoch + 1);
+      }
       setUser(currentUser);
+      loadStateFromStorage();
+      setSyncSnapshot(studyStorage.getSyncSnapshot());
       setIsAuthReady(true);
 
       if (currentUser) {
         setIsSyncing(true);
-        try {
-          await studyStorage.syncWithCloudUser(currentUser);
-          const refreshedDocs = studyStorage.getDocuments();
-          setDocuments(refreshedDocs);
-          if (refreshedDocs.length > 0 && !activeDoc) {
-            setActiveDoc(refreshedDocs[0]);
-          }
-        } catch (err) {
-          console.error('Error syncing with Firestore:', err);
-        } finally {
-          setIsSyncing(false);
-        }
+        studyStorage
+          .syncWithCloudUser(currentUser)
+          .catch((err) => console.error('Error syncing with Firestore:', err))
+          .finally(() => {
+            // Ignore results for an account that is no longer signed in.
+            if (authUidRef.current !== currentUser.uid) return;
+            loadStateFromStorage();
+            setIsSyncing(false);
+          });
+      } else {
+        setIsSyncing(false);
       }
     });
 
-    return () => unsubscribe();
-  }, []);
+    return () => {
+      unsubscribeAuth();
+      unsubscribeStorage();
+    };
+  }, [loadStateFromStorage]);
+
+  const handleLogout = async () => {
+    await studyStorage.flushPendingWrites();
+    const unsynced = studyStorage.getUnsyncedChangeCount();
+    const deviceOnly = studyStorage.getDeviceOnlyDataSummary();
+    const deviceOnlyItems =
+      deviceOnly.notebookEntries +
+      deviceOnly.plannerTasks +
+      deviceOnly.annotatedDocuments +
+      deviceOnly.focusSessions +
+      deviceOnly.creativeAssets;
+
+    if (unsynced > 0 || deviceOnlyItems > 0) {
+      const warnings: string[] = [];
+      if (unsynced > 0) {
+        warnings.push(
+          `${unsynced} change${unsynced === 1 ? ' has' : 's have'} not been saved to your account yet.`
+        );
+      }
+      if (deviceOnlyItems > 0) {
+        warnings.push(
+          'Notebook entries, planner tasks, PDF annotations and focus history are stored only on this device.'
+        );
+      }
+      const confirmed = window.confirm(
+        `${warnings.join('\n')}\n\nSigning out removes your study data from this device. Sign out anyway?`
+      );
+      if (!confirmed) return;
+    }
+
+    // Remove this account's private data from the device before ending the session.
+    studyStorage.clearCurrentAccountFromDevice();
+    await signOutUser();
+  };
 
   const refreshDocumentsState = () => {
     const refreshed = studyStorage.getDocuments();
@@ -327,7 +396,7 @@ export function App() {
         className="fixed top-0 left-0 right-0 h-16 z-30 bg-white/10 dark:bg-white/[0.04] backdrop-blur-2xl backdrop-saturate-150 border-b border-black/[0.06] dark:border-white/[0.08] shadow-[0_4px_30px_rgba(0,0,0,0.02)] pointer-events-none transition-colors"
         aria-hidden="true"
       />
-      <DynamicCompanion activeDoc={effectiveDoc} />
+      {isAuthReady && <DynamicCompanion key={`companion-${scopeEpoch}`} activeDoc={effectiveDoc} />}
       <Navbar
         activeTab={activeTab}
         onSelectTab={handleSelectTab}
@@ -340,8 +409,9 @@ export function App() {
         user={user}
         isAuthReady={isAuthReady}
         isSyncing={isSyncing}
+        syncSnapshot={syncSnapshot}
         onLogin={signInWithGoogle}
-        onLogout={signOutUser}
+        onLogout={handleLogout}
         documents={documents}
         onSelectDocumentFromSearch={(doc) => handleSelectDocument(doc, 'explain')}
         notifications={notifications}
@@ -351,7 +421,14 @@ export function App() {
       />
 
       {/* Main Content Container */}
-      <main className="flex-1">
+      <main className="flex-1" key={`main-${scopeEpoch}`}>
+        {!isAuthReady && (
+          <div role="status" className="max-w-xl mx-auto px-4 py-16 text-center text-sm text-[#606B7C]">
+            Loading your study space…
+          </div>
+        )}
+        {isAuthReady && (
+        <>
         {activeTab === 'home' && (
           <HomeView
             documents={documents}
@@ -377,7 +454,7 @@ export function App() {
               studentName={
                 user?.displayName
                   ? user.displayName.split(' ')[0]
-                  : studentProfile.fullName
+                  : studentProfile.fullName || 'Student'
               }
               documents={documents}
               activeDoc={activeDoc}
@@ -404,7 +481,7 @@ export function App() {
               onNavigateProgress={() => handleSelectTab('dashboard')}
               onOpenPdfWorkspace={() => handleSelectTab('pdf-workspace')}
               onOpenUploadModal={() => handleSelectTab('home')}
-              isCloudSynced={!!user}
+              isCloudSynced={!!user && syncSnapshot.state === 'synced'}
             />
           </div>
         )}
@@ -543,14 +620,19 @@ export function App() {
             />
           </div>
         )}
+        </>
+        )}
       </main>
 
       {/* Personalized Student Academic Profile Modal */}
+      {isAuthReady && (
       <StudentProfileModal
+        key={`profile-${scopeEpoch}`}
         isOpen={profileModalOpen}
         onClose={() => setProfileModalOpen(false)}
         onProfileSaved={(updated) => setStudentProfile(updated)}
       />
+      )}
 
       {/* Live Voice AI Tutor Modal */}
       {activeDoc && isFeatureEnabled('liveVoice') && (
@@ -563,7 +645,9 @@ export function App() {
       )}
 
       {/* Smart Notebook, OCR Scanner & Voice Recorder Modal */}
+      {isAuthReady && (
       <NotebookAndScannerModal
+        key={`notebook-${scopeEpoch}`}
         isOpen={notebookModalOpen}
         initialMode={notebookInitialTab}
         onClose={() => setNotebookModalOpen(false)}
@@ -576,6 +660,7 @@ export function App() {
           handleSelectTab('study');
         }}
       />
+      )}
     </div>
   );
 }

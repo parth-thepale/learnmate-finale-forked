@@ -23,7 +23,7 @@ import type {
   Generate3DModelResponse,
   Custom3DSceneSpec,
 } from '../types/study';
-import { auth } from '../firebase';
+import { auth, isAuthTokenServiceError, signOutUser } from '../firebase';
 
 export interface AiStatusMetadata {
   aiStatus?: string;
@@ -157,7 +157,16 @@ export async function getApiIdToken(forceRefresh = false): Promise<string> {
   if (!user) {
     throw new ApiRequestError(SIGN_IN_REQUIRED_MESSAGE, 401, 'auth_required');
   }
-  return user.getIdToken(forceRefresh);
+  try {
+    return await user.getIdToken(forceRefresh);
+  } catch (err) {
+    // A persisted session whose refresh is rejected is ended cleanly instead of failing silently.
+    if (isAuthTokenServiceError(err)) {
+      await signOutUser().catch(() => undefined);
+      throw new ApiRequestError('Your session has expired. Please sign in again.', 401, 'token_expired');
+    }
+    throw err;
+  }
 }
 
 async function authorizedFetch(url: string, init: RequestInit): Promise<Response> {

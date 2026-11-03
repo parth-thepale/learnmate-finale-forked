@@ -12,14 +12,30 @@ service cloud.firestore {
       return isAuthenticated() && request.auth.uid == userId;
     }
 
+    function optionalString(data, field, maxSize) {
+      return !(field in data) || (data[field] is string && data[field].size() <= maxSize);
+    }
+
+    // Storage v2 metadata (size-safe sync: inline payload or ordered chunk documents).
+    function isValidStorageMetadata(data) {
+      return (!('storageVersion' in data) || (data.storageVersion is int && data.storageVersion == 2)) &&
+             (!('payloadEncoding' in data) || data.payloadEncoding in ['inline', 'chunked']) &&
+             (!('chunkCount' in data) || (data.chunkCount is int && data.chunkCount >= 0 && data.chunkCount <= 16)) &&
+             (!('payloadBytes' in data) || (data.payloadBytes is int && data.payloadBytes >= 0 && data.payloadBytes <= 8000000)) &&
+             optionalString(data, 'payloadChecksum', 16) &&
+             (!('payloadEncoding' in data) || data.payloadEncoding != 'chunked' ||
+               (data.chunkCount is int && data.chunkCount >= 1 && data.payloadChecksum is string));
+    }
+
     function isValidUserProfile(data, userId) {
       return data.keys().hasAll(['uid', 'updatedAt']) &&
              data.uid is string && data.uid == userId &&
              data.updatedAt is string && data.updatedAt.size() <= 64 &&
-             (!('email' in data) || (data.email is string && data.email.size() <= 320)) &&
-             (!('displayName' in data) || (data.displayName is string && data.displayName.size() <= 160)) &&
-             (!('photoURL' in data) || (data.photoURL is string && data.photoURL.size() <= 2048)) &&
-             (!('activeDocumentId' in data) || (data.activeDocumentId is string && data.activeDocumentId.size() <= 160));
+             optionalString(data, 'email', 320) &&
+             optionalString(data, 'displayName', 160) &&
+             optionalString(data, 'photoURL', 2048) &&
+             optionalString(data, 'activeDocumentId', 160) &&
+             optionalString(data, 'studentProfileJson', 50000);
     }
 
     function isValidStudyDocument(data, userId) {
@@ -28,14 +44,16 @@ service cloud.firestore {
              data.id is string && data.id.size() > 0 && data.id.size() <= 160 &&
              data.title is string && data.title.size() > 0 && data.title.size() <= 300 &&
              data.sourceType in ['pdf', 'text', 'youtube', 'scanned_notes', 'voice_note', 'course'] &&
-             (!('youtubeUrl' in data) || (data.youtubeUrl is string && data.youtubeUrl.size() <= 1024)) &&
-             (!('videoId' in data) || (data.videoId is string && data.videoId.size() <= 64)) &&
+             optionalString(data, 'youtubeUrl', 1024) &&
+             optionalString(data, 'videoId', 64) &&
+             optionalString(data, 'contentVersion', 128) &&
              data.pageCount is int && data.pageCount >= 1 && data.pageCount <= 50 &&
              data.pagesJson is string && data.pagesJson.size() <= 900000 &&
              data.topicsJson is string && data.topicsJson.size() <= 200000 &&
              data.overview is string && data.overview.size() <= 10000 &&
              data.createdAt is string && data.createdAt.size() <= 64 &&
-             data.lastStudiedAt is string && data.lastStudiedAt.size() <= 64;
+             data.lastStudiedAt is string && data.lastStudiedAt.size() <= 64 &&
+             isValidStorageMetadata(data);
     }
 
     function isValidQuizAttempt(data, userId) {
@@ -49,7 +67,8 @@ service cloud.firestore {
              data.totalQuestions is int && data.totalQuestions >= 1 && data.totalQuestions <= 100 &&
              data.percentage is int && data.percentage >= 0 && data.percentage <= 100 &&
              data.attemptJson is string && data.attemptJson.size() <= 500000 &&
-             data.completedAt is string && data.completedAt.size() <= 64;
+             data.completedAt is string && data.completedAt.size() <= 64 &&
+             isValidStorageMetadata(data);
     }
 
     function isValidStudyState(data, userId) {
@@ -57,11 +76,21 @@ service cloud.firestore {
              data.uid is string && data.uid == userId &&
              data.documentId is string && data.documentId.size() > 0 && data.documentId.size() <= 160 &&
              data.updatedAt is string && data.updatedAt.size() <= 64 &&
-             (!('tutorMessagesJson' in data) || (data.tutorMessagesJson is string && data.tutorMessagesJson.size() <= 600000)) &&
-             (!('mistakesJson' in data) || (data.mistakesJson is string && data.mistakesJson.size() <= 300000)) &&
-             (!('revisionPlanJson' in data) || (data.revisionPlanJson is string && data.revisionPlanJson.size() <= 300000)) &&
-             (!('cachedQuizJson' in data) || (data.cachedQuizJson is string && data.cachedQuizJson.size() <= 300000)) &&
-             (!('quickReviseJson' in data) || (data.quickReviseJson is string && data.quickReviseJson.size() <= 500000));
+             optionalString(data, 'tutorMessagesJson', 600000) &&
+             optionalString(data, 'mistakesJson', 300000) &&
+             optionalString(data, 'revisionPlanJson', 300000) &&
+             optionalString(data, 'cachedQuizJson', 300000) &&
+             optionalString(data, 'quickReviseJson', 500000) &&
+             isValidStorageMetadata(data);
+    }
+
+    // One ordered piece of a chunked payload. Readers verify count and checksum on the parent.
+    function isValidChunk(data, userId, chunkId) {
+      return data.keys().hasOnly(['index', 'uid', 'data']) &&
+             data.uid is string && data.uid == userId &&
+             data.index is int && data.index >= 0 && data.index < 16 &&
+             string(data.index) == chunkId &&
+             data.data is string && data.data.size() <= 700000;
     }
 
     // ===============================================================
@@ -74,21 +103,44 @@ service cloud.firestore {
 
       match /documents/{docId} {
         allow read: if isOwner(userId);
-        allow create, update: if isOwner(userId) && isValidStudyDocument(request.resource.data, userId);
+        allow create, update: if isOwner(userId) && isValidStudyDocument(request.resource.data, userId) &&
+                                 request.resource.data.id == docId;
         allow delete: if isOwner(userId);
+
+        match /chunks/{chunkId} {
+          allow read, delete: if isOwner(userId);
+          allow create, update: if isOwner(userId) && isValidChunk(request.resource.data, userId, chunkId);
+        }
       }
 
       match /attempts/{attemptId} {
         allow read: if isOwner(userId);
-        allow create, update: if isOwner(userId) && isValidQuizAttempt(request.resource.data, userId);
+        allow create, update: if isOwner(userId) && isValidQuizAttempt(request.resource.data, userId) &&
+                                 request.resource.data.id == attemptId;
         allow delete: if isOwner(userId);
+
+        match /chunks/{chunkId} {
+          allow read, delete: if isOwner(userId);
+          allow create, update: if isOwner(userId) && isValidChunk(request.resource.data, userId, chunkId);
+        }
       }
 
       match /studyState/{docId} {
         allow read: if isOwner(userId);
-        allow create, update: if isOwner(userId) && isValidStudyState(request.resource.data, userId);
+        allow create, update: if isOwner(userId) && isValidStudyState(request.resource.data, userId) &&
+                                 request.resource.data.documentId == docId;
         allow delete: if isOwner(userId);
+
+        match /chunks/{chunkId} {
+          allow read, delete: if isOwner(userId);
+          allow create, update: if isOwner(userId) && isValidChunk(request.resource.data, userId, chunkId);
+        }
       }
+    }
+
+    // Server-only AI usage quota counters (written with the Admin SDK, which bypasses rules).
+    match /aiUsageDaily/{entryId} {
+      allow read, write: if false;
     }
   }
 }

@@ -14,7 +14,6 @@ import {
   FilePenLine,
   LogIn,
   LogOut,
-  Check,
   Clock,
   GraduationCap,
   Target,
@@ -25,6 +24,7 @@ import { User } from 'firebase/auth';
 import { StudyDocument, LearnMateNotification, StudentAcademicProfile } from '../types/study';
 import { EXAM_BLUEPRINTS } from '../utils/examSimulatorEngine';
 import { CompactStudyUtilitiesWidget } from './CompactStudyUtilitiesWidget';
+import type { SyncSnapshot } from '../services/syncStatus';
 
 export type ActiveTab =
   | 'home'
@@ -47,6 +47,7 @@ interface NavbarProps {
   user?: User | null;
   isAuthReady?: boolean;
   isSyncing?: boolean;
+  syncSnapshot?: SyncSnapshot;
   onLogin?: () => void;
   onLogout?: () => void;
   documents?: StudyDocument[];
@@ -67,6 +68,7 @@ export const Navbar: React.FC<NavbarProps> = ({
   user,
   isAuthReady,
   isSyncing,
+  syncSnapshot,
   onLogin,
   onLogout,
   documents = [],
@@ -149,6 +151,22 @@ export const Navbar: React.FC<NavbarProps> = ({
     studentProfile?.educationStage === 'college'
       ? studentProfile?.degreeCourse || 'College'
       : studentProfile?.schoolClass || 'Class 12';
+
+  const profileSummary = studentProfile?.updatedAt
+    ? `${classOrStageLabel} • ${targetExamShort}${studentProfile.targetExamYear ? ` (${studentProfile.targetExamYear})` : ''}`
+    : 'Profile not set up yet';
+
+  const syncLabel = !user
+    ? null
+    : isSyncing || syncSnapshot?.state === 'syncing'
+    ? 'Syncing with your account…'
+    : syncSnapshot?.state === 'unsynced'
+    ? syncSnapshot.unsyncedChanges > 0
+      ? `${syncSnapshot.unsyncedChanges} change${syncSnapshot.unsyncedChanges === 1 ? '' : 's'} not saved to your account`
+      : syncSnapshot.lastError || 'Some changes could not be saved to your account'
+    : syncSnapshot?.state === 'synced'
+    ? 'All changes saved to your account'
+    : null;
 
   const avatarInitial =
     user?.displayName?.[0]?.toUpperCase() ||
@@ -240,9 +258,6 @@ export const Navbar: React.FC<NavbarProps> = ({
                   <span className="font-serif-editorial text-sm font-bold text-[#121827]">
                     Study Notifications
                   </span>
-                  <span className="text-[11px] text-[#2E7D52] font-medium flex items-center gap-1">
-                    <Check className="w-3 h-3" /> Up to date
-                  </span>
                 </div>
                 <div className="max-h-72 overflow-y-auto divide-y divide-[#E8E6E2]">
                   {notifications.length > 0 ? (
@@ -314,7 +329,7 @@ export const Navbar: React.FC<NavbarProps> = ({
                 </div>
               )}
               <span className="text-xs font-medium text-[#121827] hidden md:inline max-w-[160px] truncate">
-                {classOrStageLabel} / {targetExamShort}
+                {studentProfile?.updatedAt ? `${classOrStageLabel} / ${targetExamShort}` : 'Set up profile'}
               </span>
               <ChevronDown className="w-3.5 h-3.5 text-[#606B7C]" />
             </button>
@@ -326,10 +341,18 @@ export const Navbar: React.FC<NavbarProps> = ({
                     {user?.displayName || studentProfile?.fullName || 'Student'}
                   </div>
                   <div className="text-[11px] text-[#606B7C] truncate">
-                    {isSyncing
-                      ? 'Syncing cloud records...'
-                      : `${classOrStageLabel} • ${targetExamShort} (${studentProfile?.targetExamYear || '2027'})`}
+                    {profileSummary}
                   </div>
+                  {syncLabel && (
+                    <div
+                      role="status"
+                      className={`text-[11px] mt-1 ${
+                        syncSnapshot?.state === 'unsynced' ? 'text-[#B3261E] font-semibold' : 'text-[#606B7C]'
+                      }`}
+                    >
+                      {syncLabel}
+                    </div>
+                  )}
                 </div>
 
                 {/* Quick Search Materials inside Menu */}
