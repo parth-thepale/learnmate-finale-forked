@@ -526,19 +526,23 @@ export const DynamicCompanion: React.FC<DynamicCompanionProps> = ({ activeDoc })
               </button>
             )}
 
-            {/* Divider */}
-            <div className="w-[1px] h-3.5 bg-white/20" />
+            {isFeatureEnabled('companionChat') && (
+              <>
+                {/* Divider */}
+                <div className="w-[1px] h-3.5 bg-white/20" />
 
-            {/* AI Companion Quick Trigger */}
-            <button
-              type="button"
-              onClick={() => setMode('ai')}
-              className="flex items-center gap-1.5 px-2 py-0.5 rounded-full hover:bg-white/15 text-xs font-medium transition-colors cursor-pointer text-slate-200 hover:text-white"
-              title="Open AI Study Companion"
-            >
-              <Sparkles className="w-3.5 h-3.5 text-indigo-400 animate-spin-slow" />
-              <span className="font-medium tracking-tight">AI Companion</span>
-            </button>
+                {/* AI Companion Quick Trigger */}
+                <button
+                  type="button"
+                  onClick={() => setMode('ai')}
+                  className="flex items-center gap-1.5 px-2 py-0.5 rounded-full hover:bg-white/15 text-xs font-medium transition-colors cursor-pointer text-slate-200 hover:text-white"
+                  title="Open AI Study Companion"
+                >
+                  <Sparkles className="w-3.5 h-3.5 text-indigo-400 animate-spin-slow" />
+                  <span className="font-medium tracking-tight">AI Companion</span>
+                </button>
+              </>
+            )}
           </motion.div>
         )}
 
@@ -574,14 +578,16 @@ export const DynamicCompanion: React.FC<DynamicCompanionProps> = ({ activeDoc })
                   {isFullscreen ? <Minimize2 className="w-3 h-3" /> : <Maximize2 className="w-3 h-3" />}
                   <span>{isFullscreen ? 'Exit Focus' : 'Focus Mode'}</span>
                 </button>
-                <button
-                  type="button"
-                  onClick={() => setMode('ai')}
-                  className="p-1.5 rounded-full hover:bg-white/10 text-slate-400 hover:text-indigo-300 transition-colors cursor-pointer ml-1"
-                  title="Switch to AI Companion"
-                >
-                  <Sparkles className="w-3.5 h-3.5" />
-                </button>
+                {isFeatureEnabled('companionChat') && (
+                  <button
+                    type="button"
+                    onClick={() => setMode('ai')}
+                    className="p-1.5 rounded-full hover:bg-white/10 text-slate-400 hover:text-indigo-300 transition-colors cursor-pointer ml-1"
+                    title="Switch to AI Companion"
+                  >
+                    <Sparkles className="w-3.5 h-3.5" />
+                  </button>
+                )}
                 <button
                   type="button"
                   onClick={() => setMode('idle')}
@@ -705,7 +711,7 @@ export const DynamicCompanion: React.FC<DynamicCompanionProps> = ({ activeDoc })
         {/* ========================================================= */}
         {/* AI COMPANION MODE (Quick Student Tutor Chat)             */}
         {/* ========================================================= */}
-        {mode === 'ai' && (
+        {mode === 'ai' && isFeatureEnabled('companionChat') && (
           <motion.div
             key="island-ai"
             initial={{ opacity: 0, y: -6 }}
