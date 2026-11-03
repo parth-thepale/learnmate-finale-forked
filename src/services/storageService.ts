@@ -25,6 +25,13 @@ import { computeContentVersion } from '../utils/quizGrading';
 import { isFeatureEnabled } from '../config/launchFeatures';
 import type { JeeSubjectId } from '../data/jeeMainSyllabus';
 import type { StudySession } from '../types/questionBank';
+import {
+  isServerScoredAttempt,
+  TRUSTED_ATTEMPT_ID_PREFIX,
+  isTrustedAttemptShape,
+  validateTrustedAttempt,
+  sameJson,
+} from '../utils/attemptContext';
 import { createSession, nextUpdatedAt, planDocumentSessionMigration, validateSession } from '../utils/sessionModel';
 import {
   decodeStudySessionDoc,
@@ -92,6 +99,11 @@ export interface IStudyStorageRepository {
 
   getQuizAttempts(documentId?: string): QuizAttempt[];
   saveQuizAttempt(attempt: QuizAttempt): void;
+  getAttemptConflicts(): AttemptConflict[];
+  getAttemptConflict(id: string): AttemptConflict | null;
+  isStageDRulesConfirmed(): boolean;
+  setStageDRulesConfirmed(confirmed: boolean): void;
+  resolveAttemptConflicts(): { resolved: string[]; unresolved: string[] };
 
   getMistakeInsights(documentId: string): MistakeInsight[];
   saveMistakeInsights(documentId: string, mistakes: MistakeInsight[]): void;
@@ -195,6 +207,59 @@ export interface DeviceOnlyDataSummary {
   creativeAssets: number;
   /** Study sessions kept only on this device (cloud sync for sessions is not enabled yet). */
   studySessions: number;
+}
+
+export interface AttemptConflictDiagnostics {
+  id: string;
+  localCompletedAt: string;
+  remoteCompletedAt: string;
+  localScoredBy?: string;
+  remoteScoredBy?: string;
+  localScore?: number;
+  remoteScore?: number;
+  localRawMarks?: number;
+  remoteRawMarks?: number;
+  scoreDifference?: number;
+  localOutcomesCount: number;
+  remoteOutcomesCount: number;
+}
+
+export interface AttemptConflict {
+  id: string;
+  detectedAt: string;
+  status: 'unresolved' | 'resolved';
+  localAttempt: QuizAttempt;
+  remoteAttempt: QuizAttempt;
+  resolvedAt?: string;
+  canonicalAttempt?: QuizAttempt;
+  diagnostics: AttemptConflictDiagnostics;
+}
+
+export function buildConflictDiagnostics(local: QuizAttempt, remote: QuizAttempt): AttemptConflictDiagnostics {
+  const localAny = local as unknown as Record<string, unknown>;
+  const remoteAny = remote as unknown as Record<string, unknown>;
+  const localScore = typeof local.score === 'number' ? local.score : undefined;
+  const remoteScore = typeof remote.score === 'number' ? remote.score : undefined;
+  const localRaw = typeof localAny.rawMarks === 'number' ? localAny.rawMarks : undefined;
+  const remoteRaw = typeof remoteAny.rawMarks === 'number' ? remoteAny.rawMarks : undefined;
+
+  const localOutcomes = Array.isArray(local.answers) ? local.answers.length : 0;
+  const remoteOutcomes = Array.isArray(remote.answers) ? remote.answers.length : 0;
+
+  return {
+    id: local.id,
+    localCompletedAt: String(local.completedAt || ''),
+    remoteCompletedAt: String(remote.completedAt || ''),
+    localScoredBy: typeof localAny.scoredBy === 'string' ? localAny.scoredBy : undefined,
+    remoteScoredBy: typeof remoteAny.scoredBy === 'string' ? remoteAny.scoredBy : undefined,
+    localScore,
+    remoteScore,
+    localRawMarks: localRaw,
+    remoteRawMarks: remoteRaw,
+    scoreDifference: localScore !== undefined && remoteScore !== undefined ? Math.abs(localScore - remoteScore) : undefined,
+    localOutcomesCount: localOutcomes,
+    remoteOutcomesCount: remoteOutcomes,
+  };
 }
 
 export interface StudySessionInput {
@@ -376,17 +441,100 @@ export class HybridCloudStudyRepository implements IStudyStorageRepository {
   /** Session ids whose current version is confirmed in the cloud (this account, this run). */
   private readonly studySessionsConfirmed = new Set<string>();
   private readonly documentSessionMigration: boolean;
+  private stageDRulesConfirmed: boolean;
   /** Generation whose first full sync completed cleanly (null until then). */
   private initialSyncGeneration: number | null = null;
 
   constructor(
-    options: { storage?: KeyValueStorage | null; studySessionCloudSync?: boolean; documentSessionMigration?: boolean } = {}
+    options: {
+      storage?: KeyValueStorage | null;
+      studySessionCloudSync?: boolean;
+      documentSessionMigration?: boolean;
+      stageDRulesConfirmed?: boolean;
+    } = {}
   ) {
     this.storage = options.storage !== undefined ? options.storage : browserStorage();
     this.studySessionCloudSync = options.studySessionCloudSync ?? isFeatureEnabled('studySessionCloudSync');
     this.documentSessionMigration = options.documentSessionMigration ?? isFeatureEnabled('documentSessionMigration');
+    this.stageDRulesConfirmed = options.stageDRulesConfirmed ?? false;
     this.sync = new SyncStatusTracker(() => this.getUnsyncedChangeCount());
     this.sync.subscribe(() => this.notifyListeners());
+  }
+
+  isStageDRulesConfirmed(): boolean {
+    return this.stageDRulesConfirmed;
+  }
+
+  setStageDRulesConfirmed(confirmed: boolean): void {
+    this.stageDRulesConfirmed = confirmed;
+    if (confirmed) {
+      this.resolveAttemptConflicts();
+    }
+  }
+
+  getAttemptConflicts(): AttemptConflict[] {
+    return this.read<AttemptConflict[]>(KEYS.ATTEMPT_CONFLICTS, []);
+  }
+
+  getAttemptConflict(id: string): AttemptConflict | null {
+    return this.getAttemptConflicts().find((c) => c.id === id) ?? null;
+  }
+
+  private hasUnresolvedConflict(id: string): boolean {
+    const c = this.getAttemptConflict(id);
+    return Boolean(c && c.status === 'unresolved');
+  }
+
+  private saveAttemptConflict(conflict: AttemptConflict): void {
+    const list = this.getAttemptConflicts();
+    const idx = list.findIndex((c) => c.id === conflict.id);
+    if (idx >= 0) {
+      list[idx] = conflict;
+    } else {
+      list.push(conflict);
+    }
+    this.write(KEYS.ATTEMPT_CONFLICTS, list);
+  }
+
+  resolveAttemptConflicts(): { resolved: string[]; unresolved: string[] } {
+    if (!this.stageDRulesConfirmed) {
+      return {
+        resolved: [],
+        unresolved: this.getAttemptConflicts().filter((c) => c.status === 'unresolved').map((c) => c.id),
+      };
+    }
+    const conflicts = this.getAttemptConflicts();
+    const resolvedIds: string[] = [];
+    const unresolvedIds: string[] = [];
+    let changed = false;
+    const allAttempts = this.read<QuizAttempt[]>(KEYS.ATTEMPTS, []);
+    const attemptMap = new Map(allAttempts.map((a) => [a.id, a]));
+
+    for (const conflict of conflicts) {
+      if (conflict.status !== 'unresolved') continue;
+      const remote = conflict.remoteAttempt;
+      if (isTrustedAttemptShape(remote) && validateTrustedAttempt(remote).length === 0) {
+        conflict.status = 'resolved';
+        conflict.resolvedAt = new Date().toISOString();
+        conflict.canonicalAttempt = remote;
+        attemptMap.set(remote.id, remote);
+        resolvedIds.push(conflict.id);
+        changed = true;
+      } else {
+        unresolvedIds.push(conflict.id);
+      }
+    }
+
+    if (changed) {
+      this.write(KEYS.ATTEMPT_CONFLICTS, conflicts);
+      const merged = [...attemptMap.values()].sort(
+        (a, b) => new Date(b.completedAt).getTime() - new Date(a.completedAt).getTime()
+      );
+      this.write(KEYS.ATTEMPTS, merged);
+      this.notifyListeners();
+    }
+
+    return { resolved: resolvedIds, unresolved: unresolvedIds };
   }
 
   // -------------------------------------------------------------------------
@@ -655,6 +803,7 @@ export class HybridCloudStudyRepository implements IStudyStorageRepository {
     tracksChunks = true
   ): Promise<void> {
     if (!this.currentUser || !this.cloud) return Promise.resolve();
+    if (kind === 'attempts' && (id.startsWith(TRUSTED_ATTEMPT_ID_PREFIX) || this.hasUnresolvedConflict(id))) return Promise.resolve();
     const cloud = this.cloud;
     const generation = this.generation;
     const revision = this.markDirty(kind, id);
@@ -702,7 +851,14 @@ export class HybridCloudStudyRepository implements IStudyStorageRepository {
 
   private persistAttemptToCloud(attempt: QuizAttempt): Promise<void> {
     const uid = this.currentUser?.uid;
-    if (!uid || !isSafeCloudId(attempt.id)) return Promise.resolve();
+    if (
+      !uid ||
+      !isSafeCloudId(attempt.id) ||
+      isServerScoredAttempt(attempt) ||
+      this.hasUnresolvedConflict(attempt.id)
+    ) {
+      return Promise.resolve();
+    }
     return this.queueCloudWrite('attempts', attempt.id, cloudPaths.attempt(uid, attempt.id), (prev) =>
       encodeQuizAttempt(uid, attempt, prev)
     );
@@ -768,9 +924,17 @@ export class HybridCloudStudyRepository implements IStudyStorageRepository {
     for (const id of Object.keys(dirty.deletedDocuments)) tasks.push(this.deleteDocumentFromCloud(id));
     const attemptsById = new Map(this.getQuizAttempts().map((a) => [a.id, a]));
     const uid = this.currentUser?.uid;
-    for (const id of Object.keys(dirty.attempts)) {
+    for (const [id, rev] of Object.entries(dirty.attempts)) {
+      if (id.startsWith(TRUSTED_ATTEMPT_ID_PREFIX) || this.hasUnresolvedConflict(id)) {
+        this.clearDirty('attempts', id, rev);
+        continue;
+      }
       const local = attemptsById.get(id);
       if (local) {
+        if (isServerScoredAttempt(local)) {
+          this.clearDirty('attempts', id, rev);
+          continue;
+        }
         tasks.push(this.persistAttemptToCloud(local));
       } else if (uid && isSafeCloudId(id)) {
         // The attempt was removed locally (progress reset); finish removing it from the cloud.
@@ -860,6 +1024,7 @@ export class HybridCloudStudyRepository implements IStudyStorageRepository {
       }
 
       // 3. Attempts (union of local and cloud).
+      const inspectedDirty = this.readDirty();
       const cloudAttempts = await cloud.listCollection(cloudPaths.attempts(uid));
       if (!stillCurrent()) return;
       const attemptMap = new Map(this.getQuizAttempts().map((a) => [a.id, a]));
@@ -867,10 +1032,60 @@ export class HybridCloudStudyRepository implements IStudyStorageRepository {
       for (const entry of cloudAttempts) {
         cloudAttemptIds.add(entry.id);
         this.chunkCounts.set(cloudPaths.attempt(uid, entry.id), chunkCountOf(entry.data));
-        if (attemptMap.has(entry.id)) continue;
+        const inspectedRev = inspectedDirty.attempts[entry.id];
+        if (inspectedRev !== undefined) {
+          this.clearDirty('attempts', entry.id, inspectedRev);
+        }
+        const local = attemptMap.get(entry.id);
         try {
           const attempt = await decodeQuizAttempt(cloud, uid, entry.data);
-          attemptMap.set(attempt.id, attempt);
+          if (!stillCurrent()) return;
+          if (!local) {
+            const existingConflict = this.getAttemptConflict(entry.id);
+            if (existingConflict && existingConflict.status === 'unresolved') {
+              if (this.stageDRulesConfirmed && isTrustedAttemptShape(attempt) && validateTrustedAttempt(attempt).length === 0) {
+                existingConflict.status = 'resolved';
+                existingConflict.resolvedAt = new Date().toISOString();
+                existingConflict.canonicalAttempt = attempt;
+                this.saveAttemptConflict(existingConflict);
+                attemptMap.set(attempt.id, attempt);
+              } else {
+                existingConflict.remoteAttempt = attempt;
+                this.saveAttemptConflict(existingConflict);
+              }
+            } else {
+              attemptMap.set(attempt.id, attempt);
+            }
+          } else if (sameJson(local, attempt)) {
+            attemptMap.set(attempt.id, attempt);
+          } else {
+            // Local and remote differ on the same ID
+            if (this.stageDRulesConfirmed && isTrustedAttemptShape(attempt) && validateTrustedAttempt(attempt).length === 0) {
+              // Stage D provenance confirmed: server-authoritative record becomes canonical
+              attemptMap.set(attempt.id, attempt);
+              const existingConflict = this.getAttemptConflict(entry.id);
+              if (existingConflict) {
+                existingConflict.status = 'resolved';
+                existingConflict.resolvedAt = new Date().toISOString();
+                existingConflict.canonicalAttempt = attempt;
+                this.saveAttemptConflict(existingConflict);
+              }
+            } else {
+              // Before Stage D confirmation: quarantine as unresolved conflict.
+              // Never prioritize local over remote solely because isServerScoredAttempt is true.
+              // Neither version is silently discarded.
+              const conflict: AttemptConflict = {
+                id: entry.id,
+                detectedAt: new Date().toISOString(),
+                status: 'unresolved',
+                localAttempt: local,
+                remoteAttempt: attempt,
+                diagnostics: buildConflictDiagnostics(local, attempt),
+              };
+              this.saveAttemptConflict(conflict);
+              attemptMap.delete(entry.id);
+            }
+          }
         } catch {
           unreadable++;
         }
@@ -881,6 +1096,13 @@ export class HybridCloudStudyRepository implements IStudyStorageRepository {
       );
       this.write(KEYS.ATTEMPTS, mergedAttempts);
       for (const attempt of mergedAttempts) {
+        if (isServerScoredAttempt(attempt) || this.hasUnresolvedConflict(attempt.id)) {
+          const inspectedRev = inspectedDirty.attempts[attempt.id];
+          if (inspectedRev !== undefined) {
+            this.clearDirty('attempts', attempt.id, inspectedRev);
+          }
+          continue;
+        }
         if (!cloudAttemptIds.has(attempt.id)) void this.persistAttemptToCloud(attempt);
       }
 
@@ -1039,12 +1261,52 @@ export class HybridCloudStudyRepository implements IStudyStorageRepository {
           const map = new Map(this.getQuizAttempts().map((a) => [a.id, a]));
           let changed = false;
           for (const entry of entries) {
-            if (map.has(entry.id)) continue;
+            const local = map.get(entry.id);
             try {
               const attempt = await decodeQuizAttempt(cloud, uid, entry.data);
               if (!stillCurrent()) return;
-              map.set(attempt.id, attempt);
-              changed = true;
+              if (!local) {
+                const existingConflict = this.getAttemptConflict(entry.id);
+                if (existingConflict && existingConflict.status === 'unresolved') {
+                  if (this.stageDRulesConfirmed && isTrustedAttemptShape(attempt) && validateTrustedAttempt(attempt).length === 0) {
+                    existingConflict.status = 'resolved';
+                    existingConflict.resolvedAt = new Date().toISOString();
+                    existingConflict.canonicalAttempt = attempt;
+                    this.saveAttemptConflict(existingConflict);
+                    map.set(attempt.id, attempt);
+                    changed = true;
+                  }
+                } else {
+                  map.set(attempt.id, attempt);
+                  changed = true;
+                }
+              } else if (sameJson(local, attempt)) {
+                map.set(attempt.id, attempt);
+              } else {
+                if (this.stageDRulesConfirmed && isTrustedAttemptShape(attempt) && validateTrustedAttempt(attempt).length === 0) {
+                  map.set(attempt.id, attempt);
+                  const existingConflict = this.getAttemptConflict(entry.id);
+                  if (existingConflict) {
+                    existingConflict.status = 'resolved';
+                    existingConflict.resolvedAt = new Date().toISOString();
+                    existingConflict.canonicalAttempt = attempt;
+                    this.saveAttemptConflict(existingConflict);
+                  }
+                  changed = true;
+                } else {
+                  const conflict: AttemptConflict = {
+                    id: entry.id,
+                    detectedAt: new Date().toISOString(),
+                    status: 'unresolved',
+                    localAttempt: local,
+                    remoteAttempt: attempt,
+                    diagnostics: buildConflictDiagnostics(local, attempt),
+                  };
+                  this.saveAttemptConflict(conflict);
+                  map.delete(entry.id);
+                  changed = true;
+                }
+              }
             } catch {
               // ignore unreadable attempt
             }
@@ -1546,22 +1808,40 @@ export class HybridCloudStudyRepository implements IStudyStorageRepository {
 
   getQuizAttempts(documentId?: string): QuizAttempt[] {
     const all = this.read<QuizAttempt[]>(KEYS.ATTEMPTS, []);
-    const filtered = documentId ? all.filter((a) => a.documentId === documentId) : all;
+    const unresolvedIds = new Set(
+      this.getAttemptConflicts()
+        .filter((c) => c.status === 'unresolved')
+        .map((c) => c.id)
+    );
+    const filtered = all.filter((a) => !unresolvedIds.has(a.id) && (!documentId || a.documentId === documentId));
     return [...filtered].sort(
       (a, b) => new Date(b.completedAt).getTime() - new Date(a.completedAt).getTime()
     );
   }
 
   saveQuizAttempt(attempt: QuizAttempt): void {
+    if (this.hasUnresolvedConflict(attempt.id)) {
+      console.warn(`[storage] Refusing to modify attempt ${attempt.id} with unresolved conflict.`);
+      return;
+    }
     const all = this.read<QuizAttempt[]>(KEYS.ATTEMPTS, []);
     const idx = all.findIndex((a) => a.id === attempt.id);
     if (idx >= 0) {
+      const existing = all[idx];
+      // Never overwrite an existing trusted server record with a client copy.
+      if (isServerScoredAttempt(existing)) {
+        console.warn(`[storage] Refusing to overwrite trusted server attempt ${attempt.id} with client copy.`);
+        return;
+      }
       all[idx] = attempt;
     } else {
       all.push(attempt);
     }
     this.write(KEYS.ATTEMPTS, all);
-    void this.persistAttemptToCloud(attempt);
+    // Trusted attempts are read-only: never upload via normal saves.
+    if (!isServerScoredAttempt(attempt) && !this.hasUnresolvedConflict(attempt.id)) {
+      void this.persistAttemptToCloud(attempt);
+    }
   }
 
   getMistakeInsights(documentId: string): MistakeInsight[] {
@@ -1828,6 +2108,7 @@ export class HybridCloudStudyRepository implements IStudyStorageRepository {
     const docs = this.getDocuments();
     const attempts = this.getQuizAttempts();
     this.removeKey(KEYS.ATTEMPTS);
+    this.removeKey(KEYS.ATTEMPT_CONFLICTS);
     this.removeKey(KEYS.FOCUS_SESSIONS);
     for (const d of docs) {
       this.removeKey(`${KEYS.MISTAKES_PREFIX}${d.id}`);
@@ -1838,7 +2119,7 @@ export class HybridCloudStudyRepository implements IStudyStorageRepository {
     const uid = this.currentUser?.uid;
     if (uid) {
       for (const att of attempts) {
-        if (!isSafeCloudId(att.id)) continue;
+        if (!isSafeCloudId(att.id) || isServerScoredAttempt(att)) continue;
         void this.queueCloudWrite('attempts', att.id, cloudPaths.attempt(uid, att.id), (prev) =>
           deleteEntityOps(cloudPaths.attempt(uid, att.id), prev)
         );

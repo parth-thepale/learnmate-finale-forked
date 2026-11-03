@@ -18,6 +18,7 @@ import {
   INLINE_PAYLOAD_MAX_BYTES,
 } from './cloudPayload';
 import { FirestoreDataError } from '../utils/firestoreData';
+import { isServerScoredAttempt, TOP_LEVEL_TRUSTED_FIELDS } from '../utils/attemptContext';
 import { cloudPaths, type CloudData, type CloudDocStore, type CloudWriteOp } from './cloudStore';
 
 /**
@@ -213,12 +214,22 @@ export async function decodeStudyDocument(
 // Quiz attempts
 // ---------------------------------------------------------------------------
 
-export function encodeQuizAttempt(uid: string, attempt: QuizAttempt, previousChunkCount = 0): CloudWriteOp[] {
+export function encodeQuizAttempt(
+  uid: string,
+  attempt: QuizAttempt,
+  previousChunkCount = 0,
+  options: { allowTrusted?: boolean } = {}
+): CloudWriteOp[] {
   const parentPath = cloudPaths.attempt(uid, attempt.id);
   for (const field of ['id', 'documentId', 'mode', 'score', 'totalQuestions', 'percentage', 'completedAt'] as const) {
     if (attempt[field] === undefined || attempt[field] === null) {
       throw new FirestoreDataError(`attempt ${attempt.id ?? '(no id)'}: required field "${field}" is missing.`);
     }
+  }
+  if (isServerScoredAttempt(attempt) && !options.allowTrusted) {
+    throw new FirestoreDataError(
+      `Cannot encode server-scored attempt ${attempt.id} for client upload: trusted attempts are read-only.`
+    );
   }
   const base: CloudData = {
     id: attempt.id,
@@ -253,6 +264,30 @@ export async function decodeQuizAttempt(store: CloudDocStore, uid: string, data:
   if (!attempt || typeof attempt.id !== 'string') {
     throw new Error('Attempt payload is missing its id.');
   }
+
+  // Restore explicit syllabus context from top-level metadata if missing in payload
+  const hasContext = (attempt as any).context !== undefined;
+  if (!hasContext && data.contextType === 'syllabus' && typeof data.syllabusId === 'string') {
+    (attempt as any).context = {
+      type: 'syllabus',
+      examType: data.examType as any,
+      syllabusId: String(data.syllabusId),
+      syllabusRevision: Number(data.syllabusRevision),
+      subjectId: String(data.subjectId),
+      chapterId: String(data.chapterId),
+      topicIds: Array.isArray(data.topicIds) ? data.topicIds : [],
+    };
+  }
+
+  // Preserve top-level trusted metadata fields from Firestore document
+  if (isServerScoredAttempt(data) || isServerScoredAttempt(attempt)) {
+    for (const key of ['schemaVersion', 'scoredBy', 'kind', 'questionSetId', 'markingSchemeId', 'rawMarks', 'maxMarks', 'sessionId'] as const) {
+      if ((attempt as any)[key] === undefined && data[key] !== undefined) {
+        (attempt as any)[key] = data[key];
+      }
+    }
+  }
+
   return attempt;
 }
 

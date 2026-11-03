@@ -31,6 +31,27 @@ export interface TopicEvidence {
   status: TopicStatus;
   lastSeenAt: string;
   reason: string;
+  /** Questions from verified server attempts with established provenance. */
+  verifiedAttemptedQuestions: number;
+  /** Questions from unverified client or legacy attempts. */
+  unverifiedAttemptedQuestions: number;
+  /** Distinct verified attempts for this topic. */
+  verifiedDistinctAttempts: number;
+  /** Accuracy across verified attempts only (null if no verified attempts). */
+  verifiedAccuracy: number | null;
+  /** True only when evidence threshold is met with server-verified attempts. */
+  isAuthoritative: boolean;
+  /** Provenance breakdown: 'verified' (all verified), 'unverified' (all unverified), or 'mixed'. */
+  evidenceProvenance: 'verified' | 'unverified' | 'mixed';
+}
+
+export interface AssessTopicsOptions {
+  /** Explicit set of attempt ids with confirmed server provenance. */
+  verifiedAttemptIds?: ReadonlySet<string> | string[];
+  /** Optional predicate to check if an attempt has verified server provenance. */
+  isVerified?: (attempt: AttemptLike) => boolean;
+  /** When true, only verified server attempts contribute to topic status. */
+  requireVerified?: boolean;
 }
 
 interface Observation {
@@ -40,6 +61,7 @@ interface Observation {
   attemptId: string;
   at: string;
   outcome: ResponseOutcome;
+  isVerified: boolean;
 }
 
 type AttemptLike = QuizAttempt & Partial<AttemptV2Fields>;
@@ -48,7 +70,7 @@ function labelKey(label: string): string {
   return `label:${label.trim().toLowerCase().replace(/\s+/g, ' ')}`;
 }
 
-function observationsFrom(attempt: AttemptLike): Observation[] {
+function observationsFrom(attempt: AttemptLike, isVerified: boolean): Observation[] {
   const at = attempt.completedAt;
   if (attempt.schemaVersion === 2 && Array.isArray(attempt.outcomes)) {
     const out: Observation[] = [];
@@ -56,10 +78,10 @@ function observationsFrom(attempt: AttemptLike): Observation[] {
       const known = o.topicIds.filter((id) => getTopic(id));
       if (known.length > 0) {
         for (const topicId of known) {
-          out.push({ key: topicId, label: getTopic(topicId)!.topic.name, topicId, attemptId: attempt.id, at, outcome: o.outcome });
+          out.push({ key: topicId, label: getTopic(topicId)!.topic.name, topicId, attemptId: attempt.id, at, outcome: o.outcome, isVerified });
         }
       } else if (o.topicLabel) {
-        out.push({ key: labelKey(o.topicLabel), label: o.topicLabel, attemptId: attempt.id, at, outcome: o.outcome });
+        out.push({ key: labelKey(o.topicLabel), label: o.topicLabel, attemptId: attempt.id, at, outcome: o.outcome, isVerified });
       }
     }
     return out;
@@ -73,6 +95,7 @@ function observationsFrom(attempt: AttemptLike): Observation[] {
       attemptId: attempt.id,
       at,
       outcome: (a.selectedIndex < 0 ? 'unanswered' : a.isCorrect ? 'correct' : 'incorrect') as ResponseOutcome,
+      isVerified,
     }));
 }
 
@@ -89,13 +112,27 @@ function describe(e: Omit<TopicEvidence, 'reason'>): string {
     ].filter(Boolean);
     return `Not enough evidence yet (${base}); needs ${needs.join(' and ')}.`;
   }
-  return `${base}.`;
+  if (e.isAuthoritative) {
+    return `${base}; authoritative verified evidence.`;
+  }
+  if (e.evidenceProvenance === 'unverified') {
+    return `${base}; unverified practice evidence (not yet verified by server).`;
+  }
+  return `${base} (${e.verifiedAttemptedQuestions} verified); awaiting authoritative verification.`;
 }
 
-export function assessTopics(attempts: AttemptLike[]): TopicEvidence[] {
+export function assessTopics(attempts: AttemptLike[], options?: AssessTopicsOptions): TopicEvidence[] {
+  const verifiedSet = options?.verifiedAttemptIds ? new Set(options.verifiedAttemptIds) : null;
+  const isAttemptVerified = (a: AttemptLike): boolean => {
+    if (options?.isVerified) return options.isVerified(a);
+    if (verifiedSet) return verifiedSet.has(a.id);
+    return false; // Client markers alone never establish verification
+  };
+
   const byKey = new Map<string, Observation[]>();
   for (const attempt of attempts) {
-    for (const obs of observationsFrom(attempt)) {
+    const verified = isAttemptVerified(attempt);
+    for (const obs of observationsFrom(attempt, verified)) {
       const list = byKey.get(obs.key) ?? [];
       list.push(obs);
       byKey.set(obs.key, list);
@@ -112,28 +149,62 @@ export function assessTopics(attempts: AttemptLike[]): TopicEvidence[] {
     const unanswered = sorted.filter((o) => o.outcome === 'unanswered').length;
     const distinctAttempts = new Set(recent.map((o) => o.attemptId)).size;
     const accuracy = recent.length > 0 ? correct / recent.length : 0;
+
+    // Verified subset breakdown
+    const verifiedRecent = recent.filter((o) => o.isVerified);
+    const unverifiedRecent = recent.filter((o) => !o.isVerified);
+    const verifiedAttemptedQuestions = verifiedRecent.length;
+    const unverifiedAttemptedQuestions = unverifiedRecent.length;
+    const verifiedCorrect = verifiedRecent.filter((o) => o.outcome === 'correct').length;
+    const verifiedDistinctAttempts = new Set(verifiedRecent.map((o) => o.attemptId)).size;
+    const verifiedAccuracy = verifiedAttemptedQuestions > 0 ? verifiedCorrect / verifiedAttemptedQuestions : null;
+
+    const isAuthoritative =
+      verifiedAttemptedQuestions >= TOPIC_EVIDENCE_RULES.minAttemptedQuestions &&
+      verifiedDistinctAttempts >= TOPIC_EVIDENCE_RULES.minDistinctAttempts;
+
+    const evidenceProvenance: 'verified' | 'unverified' | 'mixed' =
+      verifiedAttemptedQuestions > 0 && unverifiedAttemptedQuestions === 0
+        ? 'verified'
+        : unverifiedAttemptedQuestions > 0 && verifiedAttemptedQuestions === 0
+        ? 'unverified'
+        : 'mixed';
+
+    const targetPool = options?.requireVerified ? verifiedRecent : recent;
+    const targetAttemptedCount = targetPool.length;
+    const targetDistinctCount = new Set(targetPool.map((o) => o.attemptId)).size;
+    const targetCorrectCount = targetPool.filter((o) => o.outcome === 'correct').length;
+    const targetAccuracy = targetAttemptedCount > 0 ? targetCorrectCount / targetAttemptedCount : 0;
+
     const enough =
-      recent.length >= TOPIC_EVIDENCE_RULES.minAttemptedQuestions &&
-      distinctAttempts >= TOPIC_EVIDENCE_RULES.minDistinctAttempts;
+      targetAttemptedCount >= TOPIC_EVIDENCE_RULES.minAttemptedQuestions &&
+      targetDistinctCount >= TOPIC_EVIDENCE_RULES.minDistinctAttempts;
     const status: TopicStatus = !enough
       ? 'insufficient_evidence'
-      : accuracy < TOPIC_EVIDENCE_RULES.weakAccuracyBelow
+      : targetAccuracy < TOPIC_EVIDENCE_RULES.weakAccuracyBelow
       ? 'weak'
-      : accuracy >= TOPIC_EVIDENCE_RULES.strongAccuracyAtLeast
+      : targetAccuracy >= TOPIC_EVIDENCE_RULES.strongAccuracyAtLeast
       ? 'strong'
       : 'developing';
+
     const evidence = {
       key,
       label: sorted[0].label,
       topicId: sorted[0].topicId,
-      attemptedQuestions: recent.length,
-      correct,
-      incorrect,
+      attemptedQuestions: targetAttemptedCount,
+      correct: targetCorrectCount,
+      incorrect: targetAttemptedCount - targetCorrectCount,
       unanswered,
-      distinctAttempts,
-      accuracy,
+      distinctAttempts: targetDistinctCount,
+      accuracy: targetAccuracy,
       status,
       lastSeenAt: sorted[0].at,
+      verifiedAttemptedQuestions,
+      unverifiedAttemptedQuestions,
+      verifiedDistinctAttempts,
+      verifiedAccuracy,
+      isAuthoritative,
+      evidenceProvenance,
     };
     results.push({ ...evidence, reason: describe(evidence) });
   }
@@ -141,8 +212,15 @@ export function assessTopics(attempts: AttemptLike[]): TopicEvidence[] {
 }
 
 /** Topics with enough evidence to be called weak, weakest first. */
-export function identifyWeakTopics(attempts: AttemptLike[]): TopicEvidence[] {
-  return assessTopics(attempts)
+export function identifyWeakTopics(attempts: AttemptLike[], options?: AssessTopicsOptions): TopicEvidence[] {
+  return assessTopics(attempts, options)
     .filter((t) => t.status === 'weak')
     .sort((a, b) => a.accuracy - b.accuracy || b.attemptedQuestions - a.attemptedQuestions);
+}
+
+/** Topics confirmed weak with authoritative server-verified evidence. */
+export function identifyAuthoritativeWeakTopics(attempts: AttemptLike[], options?: AssessTopicsOptions): TopicEvidence[] {
+  return assessTopics(attempts, { ...options, requireVerified: true })
+    .filter((t) => t.status === 'weak' && t.isAuthoritative)
+    .sort((a, b) => (a.verifiedAccuracy ?? a.accuracy) - (b.verifiedAccuracy ?? b.accuracy) || b.verifiedAttemptedQuestions - a.verifiedAttemptedQuestions);
 }

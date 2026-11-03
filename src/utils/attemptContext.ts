@@ -35,6 +35,52 @@ export function trustedAttemptIdFor(questionSetId: string): string {
   return `att-${questionSetId}`;
 }
 
+/** Top-level metadata fields persisted on trusted Firestore attempts. */
+export const TOP_LEVEL_TRUSTED_FIELDS = Object.freeze([
+  'schemaVersion',
+  'scoredBy',
+  'kind',
+  'contextType',
+  'questionSetId',
+  'markingSchemeId',
+  'rawMarks',
+  'maxMarks',
+  'sessionId',
+  'examType',
+  'syllabusId',
+  'syllabusRevision',
+  'subjectId',
+  'chapterId',
+] as const);
+
+export type TopLevelTrustedField = (typeof TOP_LEVEL_TRUSTED_FIELDS)[number];
+
+/** Structural shape of a trusted attempt candidate (checks syntax, not established server provenance). */
+export function isTrustedAttemptShape(raw: unknown): boolean {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return false;
+  const a = raw as Record<string, unknown>;
+  return (
+    a.schemaVersion === 2 &&
+    a.scoredBy === 'server' &&
+    typeof a.questionSetId === 'string' &&
+    QUESTION_SET_ID_PATTERN.test(a.questionSetId) &&
+    a.id === trustedAttemptIdFor(a.questionSetId)
+  );
+}
+
+/**
+ * Checks whether an attempt is identified as server-scored / read-only.
+ * Any attempt matching this must NEVER be written or uploaded by client write paths.
+ */
+export function isServerScoredAttempt(raw: unknown): boolean {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return false;
+  const a = raw as Record<string, unknown>;
+  if (typeof a.id === 'string' && a.id.startsWith(TRUSTED_ATTEMPT_ID_PREFIX)) return true;
+  if (typeof a.questionSetId === 'string' && QUESTION_SET_ID_PATTERN.test(a.questionSetId)) return true;
+  if (a.scoredBy === 'server' && (typeof a.id === 'string' && a.id.startsWith('att-qs_'))) return true;
+  return false;
+}
+
 const EXAM_TYPES: readonly ExamTypeId[] = ['jee_main', 'jee_advanced', 'neet_ug', 'cuet', 'board_exams', 'university_exams', 'general_practice'];
 const ATTEMPT_KINDS: readonly AttemptKind[] = ['ai_practice', 'topic_practice', 'sectional_test', 'full_mock'];
 const SOURCES: readonly QuestionSource[] = ['pyq', 'curated', 'ai'];
@@ -168,6 +214,19 @@ export function resolveAttemptContext(raw: unknown): ContextResolution {
       return { ok: false, reason: 'syllabus-context attempts must have documentId "".' };
     }
     return { ok: true, context, source: 'explicit' };
+  }
+  // Server-written top-level metadata: explicit syllabus context fields preserved from Firestore parent doc.
+  if (attempt.contextType === 'syllabus' && typeof attempt.syllabusId === 'string') {
+    const synthesized = {
+      type: 'syllabus' as const,
+      examType: attempt.examType,
+      syllabusId: attempt.syllabusId,
+      syllabusRevision: attempt.syllabusRevision,
+      subjectId: attempt.subjectId,
+      chapterId: attempt.chapterId,
+      topicIds: Array.isArray(attempt.topicIds) ? attempt.topicIds : [],
+    };
+    return resolveAttemptContext({ ...attempt, context: synthesized });
   }
   if (isSafeRef(attempt.documentId)) {
     const title = typeof attempt.documentTitle === 'string' ? attempt.documentTitle.slice(0, ATTEMPT_LIMITS.titleLength) : '';
@@ -303,15 +362,24 @@ export function validateTrustedAttempt(raw: unknown): string[] {
  * Server-originated evidence an attempt can be checked against. Only sources that clients cannot
  * write qualify. Currently: the server-held question set (questionSets/{id}; denied to clients by
  * the rules), whose recorded submission is the authoritative result. The Firestore attempt record
- * becomes evidence only once the rules reserve it for the server (Stage D) and the client
- * compares against it (Stage C).
+ * becomes evidence only once Stage D rules reserve it for the server and are confirmed deployed.
  */
-export type AttemptProvenance = {
-  source: 'question_set_submission';
-  set: { id: string; uid: string; submission?: { attempt?: unknown } | null };
-};
+export type AttemptProvenance =
+  | {
+      source: 'question_set_submission';
+      set: { id: string; uid: string; submission?: { attempt?: unknown } | null };
+    }
+  | {
+      source: 'firestore_attempt';
+      record: unknown;
+      /**
+       * Gated: Firestore records cannot be treated as verified until Stage D rules
+       * (server-only write rules) are deployed and confirmed. Defaults to false.
+       */
+      stageDRulesConfirmed?: boolean;
+    };
 
-function sameJson(a: unknown, b: unknown): boolean {
+export function sameJson(a: unknown, b: unknown): boolean {
   const canon = (v: unknown): unknown =>
     Array.isArray(v)
       ? v.map(canon)
@@ -328,14 +396,34 @@ function sameJson(a: unknown, b: unknown): boolean {
 
 /**
  * Verified only when the attempt is a valid trusted attempt AND it is exactly the result recorded
- * in server-originated evidence for that question set. Markers, flags or booleans supplied with
- * the attempt itself are never sufficient.
+ * in server-originated evidence. Markers, flags or booleans supplied with the attempt itself
+ * are never sufficient.
  */
-export function isVerifiedAttempt(attempt: unknown, provenance: AttemptProvenance): boolean {
-  if (!provenance || provenance.source !== 'question_set_submission' || !provenance.set) return false;
-  const recorded = provenance.set.submission?.attempt;
-  if (!recorded || !attempt || typeof attempt !== 'object') return false;
-  const a = attempt as Record<string, unknown>;
-  if (a.questionSetId !== provenance.set.id || a.id !== trustedAttemptIdFor(provenance.set.id)) return false;
-  return validateTrustedAttempt(recorded).length === 0 && sameJson(recorded, attempt);
+export function isVerifiedAttempt(attempt: unknown, provenance: AttemptProvenance | unknown): boolean {
+  if (!provenance || typeof provenance !== 'object') return false;
+  const prov = provenance as Record<string, unknown>;
+
+  if (prov.source === 'question_set_submission') {
+    const set = prov.set as { id?: string; submission?: { attempt?: unknown } | null } | undefined;
+    if (!set || typeof set.id !== 'string') return false;
+    const recorded = set.submission?.attempt;
+    if (!recorded || !attempt || typeof attempt !== 'object') return false;
+    const a = attempt as Record<string, unknown>;
+    if (a.questionSetId !== set.id || a.id !== trustedAttemptIdFor(set.id)) return false;
+    return validateTrustedAttempt(recorded).length === 0 && sameJson(recorded, attempt);
+  }
+
+  if (prov.source === 'firestore_attempt') {
+    // Stage D gate: untrusted until Stage D rules are deployed and confirmed.
+    if (prov.stageDRulesConfirmed !== true) return false;
+    const record = prov.record;
+    if (!record || !attempt || typeof record !== 'object' || typeof attempt !== 'object') return false;
+    const a = attempt as Record<string, unknown>;
+    const r = record as Record<string, unknown>;
+    if (typeof a.questionSetId !== 'string' || a.id !== trustedAttemptIdFor(a.questionSetId)) return false;
+    if (r.id !== a.id || r.questionSetId !== a.questionSetId) return false;
+    return validateTrustedAttempt(r).length === 0 && sameJson(r, attempt);
+  }
+
+  return false;
 }

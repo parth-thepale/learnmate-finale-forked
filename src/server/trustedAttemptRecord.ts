@@ -52,7 +52,7 @@ export function encodeTrustedAttemptRecord(uid: string, attempt: GradedQuizAttem
   const problems = validateTrustedAttempt(attempt);
   if (problems.length > 0) throw new TrustedAttemptRejectedError(problems);
   const parentPath = cloudPaths.attempt(uid, attempt.id);
-  return encodeQuizAttempt(uid, attempt, previousChunkCount).map((op) => {
+  return encodeQuizAttempt(uid, attempt, previousChunkCount, { allowTrusted: true }).map((op) => {
     if (op.type !== 'set') return op;
     const data = op.path === parentPath ? { ...op.data, ...trustedParentFields(attempt) } : op.data;
     return { ...op, data: toFirestoreData(data, { label: op.path }) };
