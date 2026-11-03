@@ -1,22 +1,22 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" class="dark" data-theme="dark">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>LearnMate — Your Personal AI Study Companion</title>
-    <meta name="description" content="AI-powered personalized study companion that turns your PDFs and study notes into interactive explanations, diagnostic quizzes, mistake analysis, and adaptive revision plans." />
-    <meta property="og:title" content="LearnMate — Your Personal AI Study Companion" />
-    <meta property="og:description" content="AI-powered personalized study companion that turns your PDFs and study notes into interactive explanations, diagnostic quizzes, mistake analysis, and adaptive revision plans." />
+    <title>LearnMate: Spatial AI Study Platform</title>
+    <meta name="description" content="Spatial dark-glass learning platform with 4-stage guided mastery: PDF reading, AI Socratic tutoring, 3D concept lab, and adaptive practice." />
+    <meta property="og:title" content="LearnMate: Spatial AI Study Platform" />
+    <meta property="og:description" content="Spatial dark-glass learning platform with 4-stage guided mastery: PDF reading, AI Socratic tutoring, 3D concept lab, and adaptive practice." />
     <meta property="og:type" content="website" />
     <meta name="twitter:card" content="summary_large_image" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&family=Kalam:wght@400;700&family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;0,6..72,600;0,6..72,700;1,6..72,400;1,6..72,600&family=Noto+Sans+Devanagari:wght@400;500;600;700&display=swap" rel="stylesheet" />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&family=Plus+Jakarta+Sans:wght@500;600;700;800&family=Kalam:wght@400;700&family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,600;1,6..72,400&family=Noto+Sans+Devanagari:wght@400;500;600;700&display=swap" rel="stylesheet" />
     <script>
       (function() {
         try {
-          var saved = localStorage.getItem('learnmate_theme_v1') || 'light';
-          var isDark = saved === 'dark' || (saved === 'system' && window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);
+          var saved = localStorage.getItem('learnmate_theme_v1') || 'dark';
+          var isDark = saved === 'dark' || (saved === 'system' && window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) || true;
           document.documentElement.setAttribute('data-theme', isDark ? 'dark' : 'light');
           if (isDark) {
             document.documentElement.classList.add('dark');
@@ -27,9 +27,8 @@
       })();
     </script>
   </head>
-  <body>
+  <body class="bg-[#07090E] text-[#F3F4F6] selection:bg-indigo-500/30 selection:text-indigo-200">
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
-
