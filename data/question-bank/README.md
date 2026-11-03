@@ -30,6 +30,37 @@ own: its `verification` block must be completed by the reviewer.
 
 Importing a question never makes it verified. Learnmate never certifies answers automatically.
 
+## Importing papers (admin only)
+
+The import pipeline lives in `src/server/scraper/` and is run locally from the CLI. There is no
+HTTP endpoint for it and no background scraper.
+
+```
+npm run questions:import -- sources                      # registered sources and their reuse status
+npm run questions:import -- import-pdf --paper paper.pdf --key key.csv --paper-id "Mock 1" \
+    --label curated --licence own_content --author "Name" [--key-type final] [--dry-run]
+npm run questions:import -- review --job <jobId>         # failed / ambiguous questions
+npm run bank:validate -- --details                       # every outstanding review item
+npm run questions:import -- prepare-review --job <jobId> [--mark-pending]
+```
+
+- Output goes to a new file `drafts/imports/<source>/<paper>--<jobId>.json` (tracked in Git) plus
+  `import-logs/<jobId>.json` and review sheets (local only, git-ignored). Existing files are never
+  overwritten; re-imports skip questions already in the bank and report changed ones as conflicts.
+- Every imported question keeps `importMeta` (source, file checksum, retrieval time, paper id,
+  original question number, content checksum, answer-key version/type, extraction status) and a
+  `licence`. Classification, difficulty and explanations are left for the reviewer.
+- Uploading a file grants no reuse rights. Without `--licence` the basis is `unverified`, which
+  can never be verified or served. Any declared basis is only a claim: an imported question can
+  be verified only after a reviewer adds `licence.confirmedBy` and `licence.confirmedAt`.
+- Drafts are validated in the *draft* stage (gaps are listed as review items); `verified/` uses
+  strict validation. A question can only be verified once extraction is `complete`, its key is
+  a `final` key and, for PYQs, `licence.basis` is `permission_granted` with a reference.
+- `--mark-pending` only moves drafts with no outstanding items from `draft` to `pending_review`.
+- NTA papers are registered but disabled: NTA's copyright policy requires prior permission.
+  Answer-key CSV format: `question_number,answer` with `A`–`D`, integers, `A|C` for several
+  accepted answers, or `DROPPED`.
+
 ## Source rules
 
 - `"pyq"`: only questions from officially published NTA JEE (Main) papers, with `pyq` provenance

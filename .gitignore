@@ -12,3 +12,7 @@ coverage/
 *serviceAccount*.json
 firebase-admin*.json
 *-firebase-adminsdk-*.json
+
+# Question import: generated job logs and review sheets stay local. Provenance and content
+# checksums live inside each question record (importMeta); draft files themselves are tracked.
+data/question-bank/import-logs/

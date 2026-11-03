@@ -11,7 +11,8 @@
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit",
     "test": "tsx --test \"src/**/*.test.ts\"",
-    "bank:validate": "tsx scripts/validate-question-bank.ts"
+    "bank:validate": "tsx scripts/validate-question-bank.ts",
+    "questions:import": "tsx scripts/question-import.ts"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",

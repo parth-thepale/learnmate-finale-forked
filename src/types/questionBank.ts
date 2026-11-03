@@ -38,6 +38,53 @@ export interface CuratedProvenance {
   notes?: string;
 }
 
+/**
+ * Legal basis for showing a question to students. NTA's copyright policy requires prior
+ * permission to reproduce its material, so verified PYQs must record that permission.
+ */
+export type LicenceBasis = 'own_content' | 'permission_granted' | 'licensed' | 'unverified';
+
+export interface LicenceRecord {
+  basis: LicenceBasis;
+  /** Permission letter / agreement reference (required for permission_granted and licensed). */
+  reference?: string;
+  notes?: string;
+  /**
+   * Reviewer confirmation of the licence. A basis declared at import time is only a claim; imported
+   * questions cannot be verified until a reviewer has confirmed it. The importer never sets these.
+   */
+  confirmedBy?: string;
+  confirmedAt?: string;
+}
+
+export type ExtractionStatus = 'complete' | 'needs_review' | 'failed';
+
+/** Provenance recorded by the import pipeline for every imported question. */
+export interface ImportMeta {
+  jobId: string;
+  sourceId: string;
+  sourceName: string;
+  sourceUrl?: string;
+  sourceFileSha256: string;
+  retrievedAt: string;
+  paperId: string;
+  originalQuestionNumber: number;
+  sourceQuestionId?: string;
+  section?: string;
+  contentChecksum: string;
+  answerKey?: {
+    sourceUrl?: string;
+    fileSha256: string;
+    version: string;
+    type: 'final' | 'provisional';
+  };
+  extraction: {
+    status: ExtractionStatus;
+    issues: string[];
+  };
+  possibleDuplicateOf?: string[];
+}
+
 export interface Verification {
   status: VerificationStatus;
   reviewedBy?: string;
@@ -58,6 +105,8 @@ interface BankQuestionBase {
   keyStatus?: KeyStatus;
   /** Groups curated questions that together form one complete paper (e.g. a full-length mock). */
   paperSetId?: string;
+  licence?: LicenceRecord;
+  importMeta?: ImportMeta;
   pyq?: PyqProvenance;
   curated?: CuratedProvenance;
   verification: Verification;

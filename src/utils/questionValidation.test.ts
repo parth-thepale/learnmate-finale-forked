@@ -70,6 +70,7 @@ function pyqNumerical(overrides: Partial<BankNumericalQuestion> = {}): BankNumer
       paperUrl: 'https://cdnbbsr.s3waas.gov.in/example/paper.pdf',
       answerKeyUrl: 'https://jeemain.nta.nic.in/example/final-key.pdf',
     },
+    licence: { basis: 'permission_granted', reference: 'TEST-NTA-PERMISSION-001' },
     verification: verified,
     ...overrides,
   };
@@ -195,7 +196,13 @@ test('full-length mocks require one complete verified paper (25 per subject: 20 
   for (const subjectId of subjects) {
     const [chapterId, topicId] = chapterFor[subjectId];
     for (let i = 0; i < 25; i++) {
-      const base = { subjectId, chapterId, topicIds: [topicId], pyq: { ...pyqNumerical().pyq!, questionNumber: n } };
+      const base = {
+        subjectId,
+        chapterId,
+        topicIds: [topicId],
+        pyq: { ...pyqNumerical().pyq!, questionNumber: n },
+        licence: pyqNumerical().licence,
+      };
       paper.push(
         i < 20
           ? ({ ...curatedMcq(), ...base, id: `pyq-full-${n}`, source: 'pyq', curated: undefined } as BankQuestion)
@@ -225,4 +232,15 @@ test('the shipped draft samples are valid but not servable until the owner verif
   assert.equal(loaded.questions.length, records.length);
   assert.equal(servableQuestions(loaded.questions).length, 0);
   assert.ok(loaded.questions.every((q) => q.source === 'curated'));
+});
+
+test('verified PYQs require a recorded reuse permission; drafts may stage them without one', () => {
+  const withoutPermission = pyqNumerical({ licence: undefined });
+  assert.ok(validateBankQuestion(withoutPermission).some((e) => e.includes('permission_granted')));
+  const unverifiedLicence = pyqNumerical({ licence: { basis: 'unverified' } });
+  assert.ok(validateBankQuestion(unverifiedLicence).length > 0);
+  const missingReference = pyqNumerical({ licence: { basis: 'permission_granted' } });
+  assert.ok(validateBankQuestion(missingReference).some((e) => e.includes('licence.reference')));
+  const staged = pyqNumerical({ licence: { basis: 'unverified' }, verification: { status: 'draft' } });
+  assert.deepEqual(validateBankQuestion(staged), []);
 });

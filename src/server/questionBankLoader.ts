@@ -10,14 +10,29 @@ export interface LoadedQuestionBankFiles {
   skippedUnverified: number;
 }
 
-/** Reads JSON arrays of bank questions from a directory (non-recursive). */
-export function readQuestionFiles(dir: string): { records: unknown[]; files: string[]; errors: string[] } {
+/**
+ * Reads JSON arrays of bank questions from a directory. Non-recursive by default (the served
+ * verified bank is flat); `recursive` is used for drafts, where imports live in sub-folders.
+ */
+export function readQuestionFiles(
+  dir: string,
+  options: { recursive?: boolean } = {}
+): { records: unknown[]; files: string[]; errors: string[] } {
   const records: unknown[] = [];
   const files: string[] = [];
   const errors: string[] = [];
   if (!fs.existsSync(dir)) return { records, files, errors };
-  for (const name of fs.readdirSync(dir).filter((n) => n.endsWith('.json')).sort()) {
-    const file = path.join(dir, name);
+  const collect = (folder: string): string[] => {
+    const out: string[] = [];
+    for (const entry of fs.readdirSync(folder, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+      const full = path.join(folder, entry.name);
+      if (entry.isDirectory() && options.recursive) out.push(...collect(full));
+      else if (entry.isFile() && entry.name.endsWith('.json')) out.push(full);
+    }
+    return out;
+  };
+  for (const file of collect(dir)) {
+    const name = path.relative(dir, file).split(path.sep).join('/');
     files.push(file);
     try {
       const parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
