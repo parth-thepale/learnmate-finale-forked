@@ -1,0 +1,20 @@
+# Normalize text files to LF in the repository so Windows (CRLF) and
+# Linux/macOS (LF) checkouts produce identical commits.
+* text=auto eol=lf
+
+# Binary assets
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary
+*.pdf binary
+*.woff binary
+*.woff2 binary
+*.mp3 binary
+*.mp4 binary
+*.wav binary
+
+# AI Studio paste artifacts were committed with CRLF; leave them byte-for-byte as-is.
+public/assets/aistudio/** -text
