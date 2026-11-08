@@ -237,9 +237,10 @@ export function encodeQuizAttempt(
     documentId: attempt.documentId,
     documentTitle: (attempt.documentTitle || '').slice(0, LEGACY_LIMITS.title),
     mode: attempt.mode,
-    score: attempt.score,
-    totalQuestions: attempt.totalQuestions,
-    percentage: attempt.percentage,
+    // Schema constraint: data.score is int && data.score >= 0 && data.score <= 100
+    score: Math.max(0, Math.min(100, Math.round(Number(attempt.score) || 0))),
+    totalQuestions: Math.max(1, Math.min(100, Math.round(Number(attempt.totalQuestions) || 1))),
+    percentage: Math.max(0, Math.min(100, Math.round(Number(attempt.percentage) || 0))),
     completedAt: attempt.completedAt,
   };
   const attemptJson = JSON.stringify(attempt);

@@ -6,6 +6,16 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { initServerFirebaseAdmin, parseServiceAccountJson, resolveAdminCredentialConfig } from './firebaseAdmin.ts';
 import { authenticateBearer } from './authMiddleware.ts';
+import {
+  MemoryApprovalRecordRepository,
+  UnavailableApprovalRecordRepository,
+} from './contentVerification/approvalRepository.ts';
+import {
+  MemoryReviewerRegistry,
+  MemoryReviewerAuditRepository,
+  UnavailableReviewerRegistry,
+  UnavailableReviewerAuditRepository,
+} from './contentVerification/reviewerAuthority.ts';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 
@@ -68,8 +78,14 @@ test('credential resolution: project comes from client config, credentials from 
 test('production without Firebase Admin credentials fails closed; development uses memory quotas', () => {
   const prod = initServerFirebaseAdmin({ env: {}, rootDir: repoRoot, isProduction: true });
   assert.equal(prod.quotaStore.kind, 'unavailable');
+  assert.ok(prod.approvalRepository instanceof UnavailableApprovalRecordRepository);
+  assert.ok(prod.reviewerRegistry instanceof UnavailableReviewerRegistry);
+  assert.ok(prod.reviewerAuditRepository instanceof UnavailableReviewerAuditRepository);
   const dev = initServerFirebaseAdmin({ env: {}, rootDir: repoRoot, isProduction: false });
   assert.equal(dev.quotaStore.kind, 'memory');
+  assert.ok(dev.approvalRepository instanceof MemoryApprovalRecordRepository);
+  assert.ok(dev.reviewerRegistry instanceof MemoryReviewerRegistry);
+  assert.ok(dev.reviewerAuditRepository instanceof MemoryReviewerAuditRepository);
 });
 
 test('real Firebase Admin SDK rejects malformed ID tokens as invalid_token', async () => {

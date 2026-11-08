@@ -146,6 +146,30 @@ export interface VideoLessonResponse {
   }>;
 }
 
+export interface UserDailyUsage {
+  timezone: 'Asia/Kolkata';
+  day: string;
+  activeSeconds: number;
+  maxActiveSeconds: number;
+  remainingActiveSeconds: number;
+  videoGenerations: number;
+  maxVideoGenerations: number;
+  remainingVideoGenerations: number;
+  model3DGenerations: number;
+  maxModel3DGenerations: number;
+  remainingModel3DGenerations: number;
+  inputTokens: number;
+  outputTokens: number;
+  estimatedCost: number;
+  actualCost: number;
+  reservedCost: number;
+  dailyBudgetUsd: number | null;
+  remainingBudgetUsd: number | null;
+  resetsAt: string;
+  nextResetSeconds: number;
+  updatedAt: string;
+}
+
 /** Error thrown for non-2xx API responses; `code` mirrors the server's machine-readable code. */
 export class ApiRequestError extends Error {
   constructor(
@@ -441,6 +465,10 @@ export const aiStudyClient = {
     }>;
   }> {
     return readJsonOrThrow(await authorizedFetch('/api/capabilities', { method: 'GET' }));
+  },
+
+  async fetchUserDailyUsage(): Promise<UserDailyUsage> {
+    return readJsonOrThrow<UserDailyUsage>(await authorizedFetch('/api/user/usage', { method: 'GET' }));
   },
 };
 

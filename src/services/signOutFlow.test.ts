@@ -6,6 +6,7 @@ import { performSignOut, prepareSignOutSummary } from './signOutFlow';
 import { HybridCloudStudyRepository } from './storageService';
 import { deferred, FakeCloudStore, fakeUser, MemoryStorage } from './testDoubles';
 import type { StudyDocument } from '../types/study';
+import { RoadmapOutboxService } from '../features/roadmaps/services/roadmapOutboxService';
 
 function makeDoc(id: string): StudyDocument {
   return {
@@ -233,4 +234,232 @@ test('account removal refuses the guest scope and malformed ids; the legacy clea
   env.repo.createStudySession({ name: 'Carol' });
   env.repo.clearCurrentAccountFromDevice();
   assert.deepEqual(listScopeRawKeys(env.storage, 'u_carol'), []);
+});
+
+// ---------------------------------------------------------------------------
+// Roadmap Outbox Sign-out Data Loss Protection Tests
+// ---------------------------------------------------------------------------
+
+test('sign-out: reports zero pending when no roadmap mutations exist', async () => {
+  const env = setup();
+  await aliceWithLocalData(env);
+  const summary = await prepareSignOutSummary(env.repo, fakeUser('alice'), { cloud: env.cloud, customStorage: env.storage });
+  assert.equal(summary.roadmapPending, 0);
+  assert.equal(summary.roadmapPermanentFailures, 0);
+});
+
+test('sign-out: successful roadmap flush before sign-out reports 0 pending and commits to cloud', async () => {
+  const env = setup();
+  await aliceWithLocalData(env);
+  RoadmapOutboxService.enqueue(
+    {
+      type: 'set',
+      path: cloudPaths.roadmap('alice', 'PHY-01'),
+      data: { roadmapId: 'PHY-01', completionPercentage: 75 },
+    },
+    'alice',
+    env.storage
+  );
+
+  assert.equal(RoadmapOutboxService.getPendingCount('alice', env.storage), 1);
+
+  // Prepare summary flushes outbox if cloud is available
+  const summary = await prepareSignOutSummary(env.repo, fakeUser('alice'), { cloud: env.cloud, customStorage: env.storage });
+  assert.equal(summary.roadmapPending, 0);
+  assert.equal(RoadmapOutboxService.getPendingCount('alice', env.storage), 0);
+
+  const cloudDoc = await env.cloud.getDoc(cloudPaths.roadmap('alice', 'PHY-01'));
+  assert.equal(cloudDoc?.completionPercentage, 75);
+});
+
+test('sign-out: failed roadmap flush leaves mutations queued and blocks destructive removal by default', async () => {
+  const env = setup();
+  await aliceWithLocalData(env);
+
+  RoadmapOutboxService.enqueue(
+    {
+      type: 'set',
+      path: cloudPaths.roadmap('alice', 'PHY-01'),
+      data: { roadmapId: 'PHY-01', completionPercentage: 80 },
+    },
+    'alice',
+    env.storage
+  );
+
+  // Cloud is offline / failing
+  env.cloud.failCommits = '503 Service Unavailable';
+
+  const summary = await prepareSignOutSummary(env.repo, fakeUser('alice'), { cloud: env.cloud, customStorage: env.storage });
+  assert.equal(summary.roadmapPending, 1);
+
+  // User attempts destructive removal: MUST be blocked by default!
+  const res = await performSignOut({
+    choice: 'remove',
+    uid: 'alice',
+    storage: env.repo,
+    signOut: env.signOut,
+    cloud: env.cloud,
+    customStorage: env.storage,
+  });
+
+  assert.equal(res.status, 'failed');
+  assert.equal((res as any).blockedByRoadmapOutbox, true);
+  assert.equal((res as any).roadmapPending, 1);
+  assert.equal(env.calls(), 0, 'Sign-out was aborted before touching auth');
+
+  // Alice data remains completely intact!
+  const outbox = RoadmapOutboxService.getOutbox('alice', env.storage);
+  assert.equal(outbox.length, 1);
+});
+
+test('sign-out: permanently failed mutation is detected and blocks destructive removal by default', async () => {
+  const env = setup();
+  await aliceWithLocalData(env);
+
+  const mut = RoadmapOutboxService.enqueue(
+    {
+      type: 'set',
+      path: cloudPaths.roadmap('alice', 'PHY-01'),
+      data: { roadmapId: 'PHY-01', completionPercentage: 100 },
+    },
+    'alice',
+    env.storage
+  );
+
+  // Mark permanently failed (e.g. schema error or retry exhaustion)
+  RoadmapOutboxService.markAttemptFailed([mut.id], new Error('permission-denied'), 'alice', env.storage);
+
+  assert.equal(RoadmapOutboxService.getPermanentFailures('alice', env.storage).length, 1);
+
+  const summary = await prepareSignOutSummary(env.repo, fakeUser('alice'), { cloud: env.cloud, customStorage: env.storage });
+  assert.equal(summary.roadmapPermanentFailures, 1);
+
+  // Destructive removal is blocked by default
+  const res = await performSignOut({
+    choice: 'remove',
+    uid: 'alice',
+    storage: env.repo,
+    signOut: env.signOut,
+    cloud: env.cloud,
+    customStorage: env.storage,
+  });
+
+  assert.equal(res.status, 'failed');
+  assert.equal((res as any).blockedByRoadmapOutbox, true);
+  assert.equal((res as any).roadmapPermanentFailures, 1);
+});
+
+test('sign-out: user chooses to retain local data succeeds safely even with pending mutations', async () => {
+  const env = setup();
+  await aliceWithLocalData(env);
+
+  RoadmapOutboxService.enqueue(
+    {
+      type: 'set',
+      path: cloudPaths.roadmap('alice', 'PHY-01'),
+      data: { roadmapId: 'PHY-01', completionPercentage: 50 },
+    },
+    'alice',
+    env.storage
+  );
+
+  // Retain local data (choice = 'keep')
+  const res = await performSignOut({
+    choice: 'keep',
+    uid: 'alice',
+    storage: env.repo,
+    signOut: env.signOut,
+    cloud: env.cloud,
+    customStorage: env.storage,
+  });
+
+  assert.deepEqual(res, { status: 'signed_out', kept: true });
+  assert.equal(env.calls(), 1);
+
+  // Pending mutation is still safely preserved in Alice scope on the device!
+  const outbox = RoadmapOutboxService.getOutbox('alice', env.storage);
+  assert.equal(outbox.length, 1);
+});
+
+test('sign-out: destructive local-data removal allowed when explicitly forced', async () => {
+  const env = setup();
+  await aliceWithLocalData(env);
+
+  RoadmapOutboxService.enqueue(
+    {
+      type: 'set',
+      path: cloudPaths.roadmap('alice', 'PHY-01'),
+      data: { roadmapId: 'PHY-01', completionPercentage: 50 },
+    },
+    'alice',
+    env.storage
+  );
+
+  // Forced removal (student explicitly acknowledged destroying unsynced progress)
+  const res = await performSignOut({
+    choice: 'remove',
+    uid: 'alice',
+    storage: env.repo,
+    signOut: env.signOut,
+    cloud: env.cloud,
+    customStorage: env.storage,
+    forceRemoveWithUnsyncedRoadmap: true,
+  });
+
+  assert.equal(res.status, 'signed_out');
+  assert.equal((res as any).kept, false);
+  assert.equal(env.calls(), 1);
+  assert.deepEqual(listScopeRawKeys(env.storage, 'u_alice'), []);
+});
+
+test('sign-out: account switching during pending writes isolates outboxes', async () => {
+  const env = setup();
+  await aliceWithLocalData(env);
+
+  // Alice has a pending mutation
+  RoadmapOutboxService.enqueue(
+    {
+      type: 'set',
+      path: cloudPaths.roadmap('alice', 'PHY-01'),
+      data: { roadmapId: 'PHY-01', completionPercentage: 40 },
+    },
+    'alice',
+    env.storage
+  );
+
+  // Alice signs out keeping local data
+  await performSignOut({
+    choice: 'keep',
+    uid: 'alice',
+    storage: env.repo,
+    signOut: env.signOut,
+    cloud: env.cloud,
+    customStorage: env.storage,
+  });
+
+  // Bob signs in
+  await env.repo.syncWithCloudUser(fakeUser('bob'));
+  assert.equal(RoadmapOutboxService.getPendingCount('bob', env.storage), 0);
+  assert.equal(RoadmapOutboxService.getOutbox('bob', env.storage).length, 0);
+
+  // Bob writes a mutation
+  RoadmapOutboxService.enqueue(
+    {
+      type: 'set',
+      path: cloudPaths.roadmap('bob', 'CHEM-01'),
+      data: { roadmapId: 'CHEM-01', completionPercentage: 90 },
+    },
+    'bob',
+    env.storage
+  );
+
+  assert.equal(RoadmapOutboxService.getPendingCount('bob', env.storage), 1);
+  assert.equal(RoadmapOutboxService.getPendingCount('alice', env.storage), 1);
+
+  // Bob flushes outbox
+  await RoadmapOutboxService.flush('bob', env.cloud, env.storage);
+  assert.equal(RoadmapOutboxService.getPendingCount('bob', env.storage), 0);
+
+  // Alice outbox was unaffected
+  assert.equal(RoadmapOutboxService.getPendingCount('alice', env.storage), 1);
 });

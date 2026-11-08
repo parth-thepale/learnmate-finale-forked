@@ -11,7 +11,15 @@ export interface ExtractedPdfResult {
   pageCount: number;
   pages: StudyPage[];
   pdfDataUrl: string;
+  isScanned?: boolean;
+  metadata?: {
+    format: 'digital' | 'scanned';
+    charCount: number;
+    cached?: boolean;
+  };
 }
+
+const pdfExtractionCache = new Map<string, ExtractedPdfResult>();
 
 function readFileAsDataUrl(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -33,6 +41,18 @@ export async function extractPagesFromPdf(file: File): Promise<ExtractedPdfResul
 
   if (file.size > MAX_PDF_SIZE_BYTES) {
     throw new Error('PDF file exceeds the 20 MB size limit.');
+  }
+
+  const cacheKey = `${file.name}_${file.size}_${file.lastModified}`;
+  const cached = pdfExtractionCache.get(cacheKey);
+  if (cached) {
+    return {
+      ...cached,
+      metadata: {
+        ...(cached.metadata || { format: 'digital', charCount: 0 }),
+        cached: true,
+      },
+    };
   }
 
   const arrayBuffer = await file.arrayBuffer();
@@ -97,11 +117,20 @@ export async function extractPagesFromPdf(file: File): Promise<ExtractedPdfResul
     pdfDataUrl = await readFileAsDataUrl(file);
   }
 
-  return {
+  const isScanned = totalExtractedChars < Math.max(30, pages.length * 25);
+  const result: ExtractedPdfResult = {
     pageCount: pdfDoc.numPages,
     pages,
     pdfDataUrl,
+    isScanned,
+    metadata: {
+      format: isScanned ? 'scanned' : 'digital',
+      charCount: totalExtractedChars,
+      cached: false,
+    },
   };
+  pdfExtractionCache.set(cacheKey, result);
+  return result;
 }
 
 /**

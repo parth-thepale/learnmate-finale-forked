@@ -38,9 +38,20 @@ import {
   type AnimatedExplanationScene,
 } from './src/utils/educationalSpecsEngine.ts';
 import {
-  callAnthropicMessagesApi,
   generateProcedural3DScene,
 } from './src/utils/ai3dModelEngine.ts';
+import {
+  detectStemSubject,
+  detectQueryIntent,
+  buildTutorSystemInstruction,
+  retrieveRelevantPagesWithHistory,
+  formatTutorPagesContext,
+  formatConversationHistory,
+  validateAndSanitizeTutorAnswer,
+  parseRobustTutorJson,
+  buildPedagogicalFallback,
+  type TutorStudyPage,
+} from './src/server/tutorEngine.ts';
 import type { Custom3DSceneSpec } from './src/types/study.ts';
 import { isFeatureEnabled } from './src/config/launchFeatures.ts';
 import { authenticateBearer, type IdTokenVerifier } from './src/server/authMiddleware.ts';
@@ -62,6 +73,15 @@ import { FixedWindowRateLimiter } from './src/server/rateLimiter.ts';
 import { REQUEST_LIMITS } from './src/server/requestValidation.ts';
 import type { StoredQuestionSet } from './src/server/questionSetStore.ts';
 import { MIN_PRACTICE_QUESTIONS, registerPracticeRoutes, type QuizGenerator } from './src/server/practiceRoutes.ts';
+import { registerContentApprovalRoutes } from './src/server/contentVerification/approvalRoutes.ts';
+import { ServerReviewerAuthority } from './src/server/contentVerification/reviewerAuthority.ts';
+import { CloudKmsSigningService, DisabledSigningService } from './src/server/contentVerification/signingService.ts';
+import { CatalogueCheckpointContentRepository } from './src/server/contentVerification/contentRepository.ts';
+import {
+  FirestoreApprovalRecordRepository,
+  MemoryApprovalRecordRepository,
+  UnavailableApprovalRecordRepository,
+} from './src/server/contentVerification/approvalRepository.ts';
 import {
   validateGeneratedMcqSet,
   type GeneratedMcqInput,
@@ -69,6 +89,11 @@ import {
 import { collectMistakeInputs } from './src/server/practiceService.ts';
 import { loadVerifiedQuestionBank } from './src/server/questionBankLoader.ts';
 import { canOfferFullLengthMock } from './src/utils/questionBank.ts';
+import {
+  defaultDailyUsageStore,
+  QuotaLimitExceededError,
+  getProviderConfigChecklist,
+} from './src/server/aiGateway.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -122,18 +147,19 @@ function loadDefaultFirebaseProjectId(): string {
 const DEFAULT_GCP_PROJECT_ID = loadDefaultFirebaseProjectId();
 
 const PORT = Number(process.env.PORT) || 3000;
+const DEFAULT_TUTOR_MODEL = process.env.DEFAULT_TUTOR_MODEL || 'gemini-3.8-flash';
 const ALLOWED_MODELS = new Set([
-  'gemini-3.1-flash-lite',
   'gemini-3.8-flash',
-  'gemini-4-argon',
   'gemini-flash-latest',
+  'gemini-3.1-flash-lite',
+  'gemini-4-argon',
 ]);
 const FALLBACK_MODEL_CHAIN = [
-  'gemini-3.1-flash-lite',
-  'gemini-3.8-flash',
+  DEFAULT_TUTOR_MODEL,
   'gemini-flash-latest',
+  'gemini-3.1-flash-lite',
 ] as const;
-const GEMINI_TIMEOUT_MS = 9500;
+const GEMINI_TIMEOUT_MS = Number(process.env.GEMINI_TIMEOUT_MS) || 25000;
 
 // Tracks per-model quota/rate-limit cooldown timestamps so requests immediately route to healthy models
 const modelCooldownUntil = new Map<string, number>();
@@ -511,6 +537,10 @@ async function generateStructuredJson<T>(params: {
   responseSchema: Record<string, unknown>;
   preferredModel?: string;
   bypassCache?: boolean;
+  temperature?: number;
+  maxOutputTokens?: number;
+  thinkingLevel?: ThinkingLevel;
+  timeoutMs?: number;
   /** Throws to reject a structurally valid but unusable result; rejected results are never cached. */
   validate?: (data: T) => void;
 }): Promise<{ data: T; modelUsed: string; providerUsed?: AiBackendProvider }> {
@@ -522,7 +552,7 @@ async function generateStructuredJson<T>(params: {
   }
 
   const candidateModels = getOrderedCandidateModels(params.preferredModel);
-  const primaryModel = candidateModels[0] || 'gemini-3.1-flash-lite';
+  const primaryModel = candidateModels[0] || DEFAULT_TUTOR_MODEL;
 
   const cacheKey = computeRequestFingerprint([
     params.operation,
@@ -560,8 +590,11 @@ async function generateStructuredJson<T>(params: {
                 systemInstruction: params.systemInstruction,
                 responseMimeType: 'application/json',
                 responseSchema: params.responseSchema,
-                temperature: 0.25,
-                ...(modelName === 'gemini-3.8-flash' || modelName === 'gemini-4-argon'
+                temperature: params.temperature ?? 0.25,
+                ...(params.maxOutputTokens ? { maxOutputTokens: params.maxOutputTokens } : {}),
+                ...(params.thinkingLevel
+                  ? { thinkingConfig: { thinkingLevel: params.thinkingLevel } }
+                  : modelName === 'gemini-3.8-flash' || modelName === 'gemini-4-argon'
                   ? { thinkingConfig: { thinkingLevel: ThinkingLevel.LOW } }
                   : modelName === 'gemini-3.1-flash-lite'
                   ? { thinkingConfig: { thinkingLevel: ThinkingLevel.MINIMAL } }
@@ -569,8 +602,9 @@ async function generateStructuredJson<T>(params: {
               },
             });
 
+            const effectiveTimeout = params.timeoutMs ?? GEMINI_TIMEOUT_MS;
             const timeoutPromise = new Promise<never>((_, reject) =>
-              setTimeout(() => reject(new Error('GEMINI_CALL_TIMEOUT')), GEMINI_TIMEOUT_MS)
+              setTimeout(() => reject(new Error('GEMINI_CALL_TIMEOUT')), effectiveTimeout)
             );
 
             const response = await Promise.race([callPromise, timeoutPromise]);
@@ -578,7 +612,14 @@ async function generateStructuredJson<T>(params: {
             if (!rawText) {
               throw new Error('EMPTY_RESPONSE');
             }
-            const data = JSON.parse(rawText) as T;
+            let data: T;
+            try {
+              data = JSON.parse(rawText) as T;
+            } catch {
+              // Try robust JSON recovery if LaTeX backslashes or code fences broke standard JSON.parse
+              const recovered = parseRobustTutorJson(rawText);
+              data = recovered as unknown as T;
+            }
             params.validate?.(data);
             return {
               data,
@@ -653,6 +694,48 @@ function formatPagesContext(pages: PageInput[]): string {
     )
     .join('\n\n');
 }
+
+/** Selects the most relevant pages for the question to stay within token limits while preserving citations. */
+function retrieveRelevantPages(
+  pages: PageInput[],
+  query: string,
+  studentContext?: StudentTutorContextInput,
+  maxPages = 6
+): PageInput[] {
+  if (!Array.isArray(pages) || pages.length <= maxPages) {
+    return pages;
+  }
+
+  const queryTerms = (query + ' ' + (studentContext?.currentTopic || ''))
+    .toLowerCase()
+    .split(/[^a-z0-9_-]+/)
+    .filter((w) => w.length > 2);
+
+  const scored = pages.map((page, index) => {
+    let score = 0;
+    const lowerContent = (page.content || '').toLowerCase();
+    const lowerTitle = (page.title || '').toLowerCase();
+
+    // Preserve first page / overview if present
+    if (page.pageNumber === 1 || index === 0) score += 3;
+    // Boost active page if student context references it
+    if (studentContext?.currentPage === page.pageNumber) score += 10;
+
+    for (const term of queryTerms) {
+      if (lowerTitle.includes(term)) score += 5;
+      if (lowerContent.includes(term)) score += 2;
+    }
+    return { page, score };
+  });
+
+  scored.sort((a, b) => b.score - a.score);
+  const selected = scored.slice(0, maxPages).map((s) => s.page);
+  // Re-sort ascending by pageNumber for logical reading flow
+  selected.sort((a, b) => a.pageNumber - b.pageNumber);
+  return selected;
+}
+
+const youtubeAnalysisCache = new Map<string, { data: unknown; cachedAt: number }>();
 
 function buildGroundedFallbackAnalysis(title: string, pages: PageInput[]) {
   const topics: TopicInput[] = pages.slice(0, 6).map((p, idx) => {
@@ -1278,6 +1361,15 @@ async function startServer() {
   } else if (firebaseAdmin.quotaStore.kind === 'memory') {
     console.warn('[security] Using in-memory quota store (development only; not durable).');
   }
+  if (firebaseAdmin.approvalRepository instanceof UnavailableApprovalRecordRepository) {
+    console.error(
+      '[security] Content approval subsystem will fail closed: Firebase Admin credentials not configured.'
+    );
+  } else if (firebaseAdmin.approvalRepository instanceof MemoryApprovalRecordRepository) {
+    console.warn('[security] Using in-memory content approval repository (development only; not durable).');
+  } else if (firebaseAdmin.approvalRepository instanceof FirestoreApprovalRecordRepository) {
+    console.log('[security] Content approval subsystem configured with durable Firestore repository.');
+  }
 
   const ipLimiter = new FixedWindowRateLimiter({
     windowMs: 60_000,
@@ -1428,30 +1520,22 @@ async function startServer() {
       const explicitStrictMode = sourceControlMode === 'material_only';
       const hasDocument = Array.isArray(pages) && pages.length > 0;
       const validPageNumbers = new Set(hasDocument ? pages.map((p) => p.pageNumber) : []);
-      const contextText = hasDocument ? formatPagesContext(pages) : 'No uploaded study material.';
-      const historyContext =
-        history && history.length > 0
-          ? history
-              .slice(-6)
-              .map((h) => `${h.role.toUpperCase()}: ${h.content}`)
-              .join('\n')
-          : 'No prior messages.';
+      const subject = detectStemSubject(question, title, studentContext?.currentTopic);
+      const intent = detectQueryIntent(question);
 
-      const studentContextSummary = studentContext
-        ? [
-            studentContext.currentTopic ? `Active Topic: ${studentContext.currentTopic}` : '',
-            studentContext.currentPage ? `Viewing Page: ${studentContext.currentPage}` : '',
-            studentContext.currentActivity ? `Learning Mode: ${studentContext.currentActivity}` : '',
-            studentContext.weakTopics && studentContext.weakTopics.length > 0
-              ? `Topics the student recently answered incorrectly: ${studentContext.weakTopics.join(', ')}`
-              : '',
-            typeof studentContext.recentScorePct === 'number'
-              ? `Latest Quiz Score: ${studentContext.recentScorePct}%`
-              : '',
-          ]
-            .filter(Boolean)
-            .join(' | ')
-        : 'Standard study session';
+      const selectedPages = hasDocument
+        ? retrieveRelevantPagesWithHistory(pages, question, history, studentContext, 6)
+        : [];
+      const contextText = selectedPages.length > 0 ? formatTutorPagesContext(selectedPages) : 'No uploaded study material.';
+      const askStartTime = Date.now();
+      const historyContext = formatConversationHistory(history, 6);
+
+      const systemInstruction = buildTutorSystemInstruction({
+        subject,
+        intent,
+        studentContext,
+        isStrictMode: explicitStrictMode,
+      });
 
       try {
         const { data: parsed, modelUsed } = await generateStructuredJson<{
@@ -1466,33 +1550,12 @@ async function startServer() {
           relatedTopics: string[];
         }>({
           operation: `study_ask_${explicitStrictMode ? 'strict' : 'hybrid'}`,
-          preferredModel: modelPreference,
-          systemInstruction: explicitStrictMode
-            ? `You are LearnMate's Strict Source-Grounded Study Tutor operating in MATERIAL ONLY mode.
-Student Learning Context: ${studentContextSummary}
-Rules for Material Only Mode:
-1. Answer ONLY if the explanation is directly supported by the provided Study Material Pages.
-2. Every claim MUST include verified page citations (pageNumber, section, verbatim quote).
-3. If the topic is NOT covered in the provided Study Material Pages, set "foundInMaterial": false, "sourceType": "general", "citations": [], and set "answer" to: "This topic is not covered in your uploaded study material. Switch to Extended Knowledge mode if you want a general explanation."`
-            : `You are LearnMate's Context-Aware Hybrid AI Study Tutor.
-Student Learning Context: ${studentContextSummary}
-
-Follow these exact rules for Hybrid Knowledge Answering:
-1. PRIORITIZE UPLOADED MATERIAL: Always check the provided Study Material Pages first.
-2. FULLY IN MATERIAL ("sourceType": "material"):
-   - If the answer is fully covered in the uploaded pages, explain it clearly using the document and return verified page citations (pageNumber, section, verbatim quote). Set "foundInMaterial": true.
-3. PARTIALLY COVERED OR EXPANSION REQUEST ("sourceType": "both"):
-   - If the question is partially covered in the document, OR if the student asks for extra examples, simplified analogies, step-by-step teaching, or follow-up questions extending a document topic, combine the document information with your general knowledge.
-   - Clearly distinguish the two in your answer using headings like "**From your material:**" and "**General knowledge:**".
-   - Include verified citations ONLY for the parts that came from the uploaded pages. Set "foundInMaterial": true.
-4. ABSENT FROM MATERIAL ("sourceType": "general"):
-   - If the uploaded material does not cover the question at all, you MUST start your answer with the exact phrase: "Not covered in your material." and then provide a helpful, clear general-knowledge explanation (with step-by-step teaching or examples).
-   - Set "foundInMaterial": false and "citations": []. NEVER fabricate document citations or imply general knowledge came from the PDF.
-5. NO UPLOADED MATERIAL:
-   - If no study material pages are provided, answer the educational question normally using general knowledge with "sourceType": "general" and "citations": [].
-6. PERSONALIZED AWARENESS:
-   - When relevant, connect your explanation to the student's active topic or recently missed topics so they can overcome misconceptions.`,
-          prompt: `Document: ${hasDocument ? title || 'Study Material' : 'None'}\n\nStudy Material Pages:\n${contextText}\n\nConversation History:\n${historyContext}\n\nStudent Question: ${question.trim()}`,
+          preferredModel: modelPreference || (intent === 'derivation' || intent === 'numerical' ? 'gemini-3.8-flash' : DEFAULT_TUTOR_MODEL),
+          temperature: 0.35,
+          maxOutputTokens: 4096,
+          timeoutMs: 25000,
+          systemInstruction,
+          prompt: `Target Subject: ${subject.toUpperCase()}\nDocument: ${hasDocument ? title || 'Study Material' : 'None'}\n\nStudy Material Pages:\n${contextText}\n\nConversation History:\n${historyContext}\n\nStudent Question: ${question.trim()}`,
           responseSchema: {
             type: Type.OBJECT,
             properties: {
@@ -1523,10 +1586,14 @@ Follow these exact rules for Hybrid Knowledge Answering:
           },
         });
 
+        // Anti-placeholder validation & sanitization
+        const validation = validateAndSanitizeTutorAnswer(parsed.answer || '', subject);
+        const verifiedAnswer = validation.sanitizedAnswer;
+
         if (explicitStrictMode) {
           const policyResult = enforceSourceControlPolicy({
             mode: 'material_only',
-            rawAnswer: parsed.answer || '',
+            rawAnswer: verifiedAnswer,
             foundInMaterial: Boolean(parsed.foundInMaterial),
             citations: parsed.citations || [],
             validPageNumbers,
@@ -1561,7 +1628,7 @@ Follow these exact rules for Hybrid Knowledge Answering:
         }
 
         const isFound = sourceType === 'material' || sourceType === 'both';
-        let finalAnswer = (parsed.answer || '').trim();
+        let finalAnswer = verifiedAnswer;
 
         if (
           hasDocument &&
@@ -1570,6 +1637,25 @@ Follow these exact rules for Hybrid Knowledge Answering:
         ) {
           finalAnswer = `Not covered in your material.\n\n${finalAnswer}`;
         }
+
+        const uid = req.authUser?.uid || 'guest-user';
+        const elapsedSec = Math.max(1, Math.round((Date.now() - askStartTime) / 1000));
+        defaultDailyUsageStore
+          .reserve({
+            uid,
+            capability: 'text_generation',
+            provider: 'gemini_developer_api',
+            model: modelUsed,
+            estimatedSeconds: elapsedSec,
+          })
+          .then((resv) =>
+            defaultDailyUsageStore.commit({
+              reservationId: resv.reservationId,
+              actualSeconds: elapsedSec,
+              success: true,
+            })
+          )
+          .catch(() => {});
 
         res.json({
           answer: finalAnswer,
@@ -1582,12 +1668,14 @@ Follow these exact rules for Hybrid Knowledge Answering:
         });
       } catch (err) {
         const notice = extractAiNotice(err);
-        const fallback = buildHybridTutorFallbackAnswer(
+        const fallback = buildPedagogicalFallback({
           question,
-          pages,
+          subject,
+          intent,
+          pages: selectedPages,
+          studentContext,
           history,
-          studentContext
-        );
+        });
         if (explicitStrictMode) {
           const policyResult = enforceSourceControlPolicy({
             mode: 'material_only',
@@ -1603,7 +1691,7 @@ Follow these exact rules for Hybrid Knowledge Answering:
             sourceControlMode: 'material_only',
             citations: policyResult.citations,
             relatedTopics: policyResult.foundInMaterial ? fallback.relatedTopics : [],
-            modelUsed: modelPreference || 'gemini-3.8-flash',
+            modelUsed: modelPreference || DEFAULT_TUTOR_MODEL,
             aiStatus: notice.aiStatus,
             aiNotice: notice.aiNotice,
           });
@@ -1612,7 +1700,7 @@ Follow these exact rules for Hybrid Knowledge Answering:
         res.json({
           ...fallback,
           sourceControlMode: 'extended_knowledge',
-          modelUsed: modelPreference || 'gemini-3.8-flash',
+          modelUsed: modelPreference || DEFAULT_TUTOR_MODEL,
           aiStatus: notice.aiStatus,
           aiNotice: notice.aiNotice,
         });
@@ -1699,6 +1787,22 @@ Rules:
     questionSetStore,
     generateQuiz: generatePracticeQuiz,
     describeGenerationFailure: (err) => ({ aiStatus: extractAiNotice(err).aiStatus }),
+  });
+
+  const reviewerAuthority = new ServerReviewerAuthority(firebaseAdmin.reviewerRegistry, {
+    auditRepository: firebaseAdmin.reviewerAuditRepository,
+  });
+  const contentSigningService = process.env.CLOUD_KMS_SIGNING_KEY
+    ? new CloudKmsSigningService()
+    : new DisabledSigningService();
+  const contentRepository = new CatalogueCheckpointContentRepository();
+  const approvalRepository = firebaseAdmin.approvalRepository;
+
+  registerContentApprovalRoutes(app, {
+    authority: reviewerAuthority,
+    contentRepository,
+    approvalRepository,
+    signingService: contentSigningService,
   });
 
   // 4. Mistake analysis & revision plan for a server-graded practice set. Which answers were wrong
@@ -2416,6 +2520,16 @@ Analyze the provided study material and generate:
 
       const canonicalWatchUrl = `https://www.youtube.com/watch?v=${videoId}`;
 
+      // Check 24-hour cache to avoid repeated processing of identical videos
+      const cachedAnalysis = youtubeAnalysisCache.get(canonicalWatchUrl);
+      if (cachedAnalysis && Date.now() - cachedAnalysis.cachedAt < 24 * 3600 * 1000) {
+        res.json({
+          ...(cachedAnalysis.data as Record<string, unknown>),
+          cacheHit: true,
+        });
+        return;
+      }
+
       // Verify video exists and is public via YouTube oEmbed
       let oembedTitle = '';
       let oembedAuthor = '';
@@ -2636,6 +2750,7 @@ Never fabricate content if the video has no educational material.`,
           },
         });
 
+        youtubeAnalysisCache.set(canonicalWatchUrl, { data: ytAnalysis, cachedAt: Date.now() });
         res.json(ytAnalysis);
         return;
       } catch (err) {
@@ -3165,7 +3280,18 @@ Evaluate:
 
   // 10b. Creative Studio — AI 3D Model Creator (Anthropic Claude + Gemini Flash + Procedural Engine)
   app.post('/api/create/3d-model', async (req, res) => {
+    const uid = req.authUser?.uid || 'guest-user';
+    let reservationId: string | null = null;
     try {
+      const reservation = await defaultDailyUsageStore.reserve({
+        uid,
+        capability: 'model3d_generation',
+        provider: 'anthropic_claude',
+        model: 'claude-haiku-4-5',
+        estimatedSeconds: 15,
+        now: new Date(),
+      });
+      reservationId = reservation.reservationId;
       const {
         concept = 'DNA Double Helix',
         contextText = '',
@@ -3197,49 +3323,27 @@ Each mesh object MUST have:
 Never output markdown fences or commentary outside the JSON.`;
 
       let sceneSpec: Custom3DSceneSpec | null = null;
-      let provider: 'anthropic_claude' | 'gemini' | 'procedural_engine' = 'procedural_engine';
+      let provider: 'gemini' | 'procedural_engine' = 'procedural_engine';
       let modelUsed = 'procedural_engine';
 
-      // 1. Attempt Anthropic Claude if key is available
-      if (process.env.ANTHROPIC_API_KEY && process.env.ANTHROPIC_API_KEY.trim()) {
+      // 1. Attempt Google Gemini 3D scene synthesis
+      const ai = getGenAIClient();
+      if (ai) {
         try {
-          const claudeText = await callAnthropicMessagesApi({
-            model: 'claude-haiku-4-5-20251001',
-            system: systemPrompt,
-            prompt: `Concept to visualize in 3D: "${concept}". Academic context: ${contextText.slice(0, 400)}. Style: ${style}. Generate structured 3D scene JSON.`,
-            maxTokens: 2500,
+          const resp = await ai.models.generateContent({
+            model: 'gemini-3.8-flash',
+            contents: `${systemPrompt}\n\nConcept to visualize in 3D: "${concept}". Academic context: ${contextText.slice(0, 400)}. Style: ${style}. Return JSON.`,
+            config: {
+              responseMimeType: 'application/json',
+            },
           });
-          if (claudeText) {
-            const cleaned = claudeText.replace(/```json\s*/i, '').replace(/```\s*$/, '').trim();
-            sceneSpec = JSON.parse(cleaned);
-            provider = 'anthropic_claude';
-            modelUsed = 'claude-haiku-4-5';
+          if (resp.text) {
+            sceneSpec = JSON.parse(resp.text);
+            provider = 'gemini';
+            modelUsed = 'gemini-3.8-flash';
           }
         } catch (err) {
-          console.warn('Claude 3D generation failed, falling back to Gemini:', err);
-        }
-      }
-
-      // 2. Attempt Gemini if Claude was skipped or failed
-      if (!sceneSpec) {
-        const ai = getGenAIClient();
-        if (ai) {
-          try {
-            const resp = await ai.models.generateContent({
-              model: 'gemini-3.8-flash',
-              contents: `${systemPrompt}\n\nConcept to visualize in 3D: "${concept}". Academic context: ${contextText.slice(0, 400)}. Style: ${style}. Return JSON.`,
-              config: {
-                responseMimeType: 'application/json',
-              },
-            });
-            if (resp.text) {
-              sceneSpec = JSON.parse(resp.text);
-              provider = 'gemini';
-              modelUsed = 'gemini-3.8-flash';
-            }
-          } catch (err) {
-            console.warn('Gemini 3D generation failed, falling back to procedural:', err);
-          }
+          console.warn('Gemini 3D generation failed, falling back to procedural:', err);
         }
       }
 
@@ -3250,19 +3354,42 @@ Never output markdown fences or commentary outside the JSON.`;
         modelUsed = 'procedural-scientific-engine';
       }
 
+      if (reservationId) {
+        await defaultDailyUsageStore.commit({
+          reservationId,
+          actualSeconds: 12,
+          success: true,
+        });
+      }
+
       res.json({
         sceneSpec,
         isAiGenerated: provider !== 'procedural_engine',
         provider,
         modelUsed,
         userFacingNotice:
-          provider === 'anthropic_claude'
-            ? '3D Model synthesized via Anthropic Claude.'
-            : provider === 'gemini'
-            ? '3D Model synthesized via Gemini 3.8 Flash.'
+          provider === 'gemini'
+            ? '3D Model synthesized via Google Gemini.'
             : '3D Model synthesized via LearnMate Procedural Scientific Engine.',
       });
     } catch (err) {
+      if (reservationId) {
+        await defaultDailyUsageStore
+          .commit({
+            reservationId,
+            actualSeconds: 0,
+            success: false,
+          })
+          .catch(() => {});
+      }
+      if (err instanceof QuotaLimitExceededError) {
+        res.status(429).json({
+          error: err.message,
+          code: err.code,
+          usage: err.usage,
+        });
+        return;
+      }
       res.status(500).json({
         error: err instanceof Error ? err.message : 'Failed to generate 3D model specification.',
       });
@@ -3356,7 +3483,18 @@ Never output markdown fences or commentary outside the JSON.`;
 
   // 12. Creative Studio — AI Video Lesson & Image-to-Video Animation (Omni 1.1 Flash + Persistent Job Tracking + Animated Explanation)
   app.post('/api/create/video-lesson', async (req, res) => {
+    const uid = req.authUser?.uid || 'guest-user';
+    let reservationId: string | null = null;
     try {
+      const reservation = await defaultDailyUsageStore.reserve({
+        uid,
+        capability: 'video_generation',
+        provider: 'higgsfield_media',
+        model: 'higgsfield-video-v1',
+        estimatedSeconds: 30,
+        now: new Date(),
+      });
+      reservationId = reservation.reservationId;
       const {
         topic = 'Core Concept',
         contextText = '',
@@ -3472,6 +3610,14 @@ Never output markdown fences or commentary outside the JSON.`;
 
       videoJobs.set(jobId, jobRecord);
 
+      if (reservationId) {
+        await defaultDailyUsageStore.commit({
+          reservationId,
+          actualSeconds: 25,
+          success: true,
+        });
+      }
+
       res.json({
         jobId,
         topic,
@@ -3486,6 +3632,23 @@ Never output markdown fences or commentary outside the JSON.`;
         scenes,
       });
     } catch (err) {
+      if (reservationId) {
+        await defaultDailyUsageStore
+          .commit({
+            reservationId,
+            actualSeconds: 0,
+            success: false,
+          })
+          .catch(() => {});
+      }
+      if (err instanceof QuotaLimitExceededError) {
+        res.status(429).json({
+          error: err.message,
+          code: err.code,
+          usage: err.usage,
+        });
+        return;
+      }
       res.status(500).json({
         error: err instanceof Error ? err.message : 'Failed to generate video lesson.',
       });
@@ -3796,6 +3959,26 @@ Never output markdown fences or commentary outside the JSON.`;
         error: err instanceof Error ? err.message : 'Failed to fetch educational places.',
       });
     }
+  });
+
+  // 15b. User-Facing Daily AI Usage & Quota Engine Endpoint (IST Midnight Rollover)
+  app.get('/api/user/usage', async (req, res) => {
+    try {
+      const uid = req.authUser?.uid || 'guest-user';
+      const usage = await defaultDailyUsageStore.getUsage(uid);
+      res.json(usage);
+    } catch (err) {
+      res.status(500).json({
+        error: err instanceof Error ? err.message : 'Failed to fetch user daily usage.',
+      });
+    }
+  });
+
+  // 15c. Provider Configuration Checklist Endpoint
+  app.get('/api/providers/checklist', (_req, res) => {
+    res.json({
+      providers: getProviderConfigChecklist(),
+    });
   });
 
   // 16. AI Usage & Stability Telemetry Dashboard Endpoint

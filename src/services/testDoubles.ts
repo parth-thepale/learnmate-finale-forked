@@ -87,7 +87,11 @@ export class FakeCloudStore implements CloudDocStore {
     this.commits++;
   }
 
-  subscribeCollection(): () => void {
+  subscribeCollection(
+    path?: string,
+    onChange?: (docs: Array<{ id: string; data: CloudData }>) => void,
+    onError?: (err: unknown) => void
+  ): () => void {
     return () => undefined;
   }
 

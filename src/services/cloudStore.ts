@@ -50,6 +50,12 @@ export const cloudPaths = {
   studySession: (uid: string, id: string) => `users/${uid}/studySessions/${id}`,
   chunks: (parentPath: string) => `${parentPath}/chunks`,
   chunk: (parentPath: string, index: number) => `${parentPath}/chunks/${index}`,
+  roadmaps: (uid: string) => `users/${uid}/roadmaps`,
+  roadmap: (uid: string, id: string) => `users/${uid}/roadmaps/${id}`,
+  roadmapRevisionQueue: (uid: string) => `users/${uid}/roadmapRevisionQueue`,
+  roadmapRevisionItem: (uid: string, id: string) => `users/${uid}/roadmapRevisionQueue/${id}`,
+  roadmapAttempts: (uid: string) => `users/${uid}/roadmapAttempts`,
+  roadmapAttempt: (uid: string, id: string) => `users/${uid}/roadmapAttempts/${id}`,
 };
 
 /** Firestore document ids may not contain '/', and must not be '.' or '..'. */

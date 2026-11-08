@@ -47,6 +47,10 @@ export const API_ROUTE_POLICIES: readonly ApiRoutePolicy[] = Object.freeze([
   },
   // Server-side grading of a stored practice set (no AI call).
   { id: 'practice.submit', method: 'POST', path: '/api/practice/submit', aiUnits: 0, validator: 'practiceSubmit', bodyLimit: 'default' },
+  // Server-side content review approval (no AI call, requires authenticated reviewer).
+  { id: 'content.approve', method: 'POST', path: '/api/content/review/approve', aiUnits: 0, bodyLimit: 'default' },
+  // Server-side content review revocation (no AI call, requires authenticated reviewer).
+  { id: 'content.revoke', method: 'POST', path: '/api/content/review/revoke', aiUnits: 0, bodyLimit: 'default' },
   { id: 'study.quickRevise', method: 'POST', path: '/api/study/quick-revise', aiUnits: 2, validator: 'quickRevise', bodyLimit: 'default' },
   {
     id: 'study.youtubeAnalyze',
@@ -80,6 +84,10 @@ export const API_ROUTE_POLICIES: readonly ApiRoutePolicy[] = Object.freeze([
 
   // Lo-fi music generation (disabled for launch)
   { id: 'create.lofiMusic', method: 'POST', path: '/api/create/lofi-music', feature: 'lofi', aiUnits: 5, bodyLimit: 'default' },
+
+  // User-facing daily AI usage and quota meters
+  { id: 'user.usage', method: 'GET', path: '/api/user/usage', aiUnits: 0, bodyLimit: 'default' },
+  { id: 'providers.checklist', method: 'GET', path: '/api/providers/checklist', aiUnits: 0, bodyLimit: 'default' },
 
   // Internal diagnostics (hidden by default; admin-only when enabled)
   { id: 'internal.usage', method: 'GET', path: '/api/usage', internal: true, aiUnits: 0, bodyLimit: 'default' },

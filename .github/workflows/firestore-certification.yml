@@ -1,0 +1,59 @@
+name: Firestore Emulator Certification
+
+on:
+  push:
+    branches:
+      - ui/founder-redesign
+  pull_request:
+    branches:
+      - ui/founder-redesign
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  certify-firestore:
+    name: Certify Firestore Transactions & Security Rules
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Java 21 for Firestore Emulator
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      - name: Set up Node.js 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: 'npm'
+
+      - name: Install dependencies cleanly
+        run: npm ci
+
+      - name: Typecheck
+        run: npx tsc --noEmit
+
+      - name: Pure unit & engine tests
+        run: npm test
+
+      - name: Production build check
+        run: npm run build
+
+      - name: Firestore security rules tests (Emulator)
+        run: npm run test:rules
+
+      - name: Firestore approval repository integration tests (Emulator)
+        run: npx --yes firebase-tools@15.34.2 emulators:exec --only firestore --project demo-learnmate-rules "tsx --test firestore-tests/firestoreApprovalRepository.emulator.test.ts"
+
+      - name: Firestore reviewer authority integration tests (Emulator)
+        run: npm run test:reviewer-authority:emulator
