@@ -139,6 +139,55 @@ service cloud.firestore {
              data.data is string && data.data.size() <= 700000;
     }
 
+    // ---------------------------------------------------------------
+    // Roadmaps progression & revision queue validation
+    // ---------------------------------------------------------------
+    function isValidRoadmapDoc(data, userId, roadmapId) {
+      return data.keys().hasAll(['roadmapId', 'uid', 'completionPercentage', 'completedCheckpointsCount', 'currentCheckpointId', 'checkpointsJson', 'updatedAt']) &&
+             data.uid is string && data.uid == userId &&
+             data.roadmapId is string && data.roadmapId == roadmapId &&
+             data.completionPercentage is int && data.completionPercentage >= 0 && data.completionPercentage <= 100 &&
+             data.completedCheckpointsCount is int && data.completedCheckpointsCount >= 0 && data.completedCheckpointsCount <= 4 &&
+             data.currentCheckpointId is string && data.currentCheckpointId.size() <= 64 &&
+             data.checkpointsJson is string && data.checkpointsJson.size() <= 200000 &&
+             data.updatedAt is string && data.updatedAt.size() <= 64;
+    }
+
+    function isValidRevisionItemDoc(data, userId, itemId) {
+      return data.keys().hasAll(['id', 'uid', 'topicId', 'topicName', 'roadmapId', 'checkpointId', 'scheduledForDate', 'intervalStep', 'status', 'consecutiveMasteryCount', 'priority', 'reason', 'updatedAt']) &&
+             data.uid is string && data.uid == userId &&
+             data.id is string && data.id == itemId &&
+             data.topicId is string && data.topicId.size() <= 160 &&
+             data.topicName is string && data.topicName.size() <= 160 &&
+             data.roadmapId is string && data.roadmapId.size() <= 32 &&
+             data.checkpointId is string && data.checkpointId.size() <= 64 &&
+             data.scheduledForDate is string && data.scheduledForDate.size() <= 16 &&
+             data.intervalStep is int && data.intervalStep >= 0 && data.intervalStep <= 10 &&
+             data.status in ['due', 'overdue', 'upcoming', 'completed'] &&
+             data.consecutiveMasteryCount is int && data.consecutiveMasteryCount >= 0 &&
+             data.priority in ['high', 'medium', 'low'] &&
+             data.reason is string && data.reason.size() <= 300 &&
+             data.updatedAt is string && data.updatedAt.size() <= 64;
+    }
+
+    function isValidRoadmapAttemptDoc(data, userId, attemptId) {
+      return data.keys().hasAll(['id', 'uid', 'checkpointId', 'roadmapId', 'percentage', 'rawMarks', 'totalMarks', 'correctCount', 'incorrectCount', 'unansweredCount', 'timeTakenSeconds', 'completedAt', 'attemptJson', 'updatedAt']) &&
+             data.uid is string && data.uid == userId &&
+             data.id is string && data.id == attemptId &&
+             data.checkpointId is string && data.checkpointId.size() <= 64 &&
+             data.roadmapId is string && data.roadmapId.size() <= 32 &&
+             data.percentage is int && data.percentage >= 0 && data.percentage <= 100 &&
+             data.rawMarks is int &&
+             data.totalMarks is int && data.totalMarks >= 0 &&
+             data.correctCount is int && data.correctCount >= 0 &&
+             data.incorrectCount is int && data.incorrectCount >= 0 &&
+             data.unansweredCount is int && data.unansweredCount >= 0 &&
+             data.timeTakenSeconds is int && data.timeTakenSeconds >= 0 &&
+             data.completedAt is string && data.completedAt.size() <= 64 &&
+             data.attemptJson is string && data.attemptJson.size() <= 200000 &&
+             data.updatedAt is string && data.updatedAt.size() <= 64;
+    }
+
     // ===============================================================
     // User Scoped Collections
     // ===============================================================
@@ -196,6 +245,24 @@ service cloud.firestore {
           allow create, update: if isOwner(userId) && isValidChunk(request.resource.data, userId, chunkId);
         }
       }
+
+      match /roadmaps/{roadmapId} {
+        allow read: if isOwner(userId);
+        allow create, update: if isOwner(userId) && isValidRoadmapDoc(request.resource.data, userId, roadmapId);
+        allow delete: if isOwner(userId);
+      }
+
+      match /roadmapRevisionQueue/{itemId} {
+        allow read: if isOwner(userId);
+        allow create, update: if isOwner(userId) && isValidRevisionItemDoc(request.resource.data, userId, itemId);
+        allow delete: if isOwner(userId);
+      }
+
+      match /roadmapAttempts/{attemptId} {
+        allow read: if isOwner(userId);
+        allow create: if isOwner(userId) && isValidRoadmapAttemptDoc(request.resource.data, userId, attemptId);
+        allow update, delete: if false;
+      }
     }
 
     // Study sessions: owner-only, validated, never moved back in time, deletion is final.
@@ -219,6 +286,22 @@ service cloud.firestore {
 
     // Server-only practice sets: answer keys live here until submission. Never readable by clients.
     match /questionSets/{setId} {
+      allow read, write: if false;
+    }
+
+    // Server-only verified content approval repository and audit subcollections.
+    // Direct client read and write operations are strictly denied.
+    match /verifiedQuestionApprovals/{document=**} {
+      allow read, write: if false;
+    }
+
+    // Server-only trusted reviewer registry directory. Direct client read and write operations are strictly denied.
+    match /trustedReviewers/{document=**} {
+      allow read, write: if false;
+    }
+
+    // Server-only reviewer authorization audit trail. Direct client read and write operations are strictly denied.
+    match /reviewerAuthorizationAudit/{document=**} {
       allow read, write: if false;
     }
   }

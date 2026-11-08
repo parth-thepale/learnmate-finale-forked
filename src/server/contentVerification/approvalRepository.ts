@@ -3,13 +3,130 @@ import type {
   ApprovalLifecycleStatus,
   ApprovalRecordRepository,
   AuditHistoryOptions,
+  AuthorizedReviewerProfile,
+  ExpectedReviewerCommitCheck,
   PersistedApprovalRecord,
+  RevokeApprovalOptions,
   RevokeApprovalOutcome,
+  ReviewerCommitFailureCode,
+  ReviewerRegistry,
+  SaveApprovalOptions,
   SaveApprovalOutcome,
   ServerApprovalRecord,
 } from './types.ts';
 import type { QuotaFirestore } from '../quotaStore.ts';
 import { toFirestoreData } from '../../utils/firestoreData.ts';
+import { validateReviewerProfile } from './reviewerAuthority.ts';
+
+/**
+ * Validates authoritative reviewer profile against expected commit constraints inside
+ * an approval or revocation transaction. Closes TOCTOU race condition.
+ */
+export function verifyReviewerCommitProfile(
+  profile: AuthorizedReviewerProfile | null | undefined,
+  expected: ExpectedReviewerCommitCheck
+): { ok: true } | { ok: false; code: ReviewerCommitFailureCode; error: string } {
+  if (!profile) {
+    return {
+      ok: false,
+      code: 'reviewer_not_found',
+      error: `Commit check failed: Reviewer "${expected.uid}" profile not found in registry.`,
+    };
+  }
+  if (profile.uid !== expected.uid) {
+    return {
+      ok: false,
+      code: 'reviewer_uid_mismatch',
+      error: `Commit check failed: Reviewer UID mismatch in registry (expected "${expected.uid}", got "${profile.uid}").`,
+    };
+  }
+  if (profile.reviewerId !== expected.reviewerId) {
+    return {
+      ok: false,
+      code: 'reviewer_id_mismatch',
+      error: `Commit check failed: Reviewer ID mismatch (expected "${expected.reviewerId}", got "${profile.reviewerId}").`,
+    };
+  }
+  if (profile.status !== 'active') {
+    return {
+      ok: false,
+      code: 'reviewer_authorization_revoked',
+      error: `Commit check failed: Reviewer status is "${profile.status}", required "active".`,
+    };
+  }
+  const perm = profile.permissions?.find((p) => p.subject === expected.subject);
+  if (!perm || perm.active !== true) {
+    return {
+      ok: false,
+      code: 'reviewer_subject_unauthorized',
+      error: `Commit check failed: Reviewer lacks active permission for subject "${expected.subject}".`,
+    };
+  }
+  if (expected.requireCanRevoke) {
+    if (perm.canRevoke !== true) {
+      return {
+        ok: false,
+        code: 'reviewer_permission_denied',
+        error: `Commit check failed: Reviewer lacks canRevoke permission for subject "${expected.subject}".`,
+      };
+    }
+  } else {
+    if (perm.canApprove !== true) {
+      return {
+        ok: false,
+        code: 'reviewer_permission_denied',
+        error: `Commit check failed: Reviewer lacks canApprove permission for subject "${expected.subject}".`,
+      };
+    }
+  }
+  if (
+    expected.expectedRecordVersion !== undefined &&
+    profile.recordVersion !== undefined &&
+    profile.recordVersion !== expected.expectedRecordVersion
+  ) {
+    return {
+      ok: false,
+      code: 'reviewer_authorization_revoked',
+      error: `Commit check failed: Reviewer record version changed from ${expected.expectedRecordVersion} to ${profile.recordVersion}.`,
+    };
+  }
+  if (
+    expected.expectedRegistryVersion !== undefined &&
+    profile.registryVersion !== undefined &&
+    profile.registryVersion !== expected.expectedRegistryVersion
+  ) {
+    return {
+      ok: false,
+      code: 'reviewer_authorization_revoked',
+      error: `Commit check failed: Reviewer registry version changed from "${expected.expectedRegistryVersion}" to "${profile.registryVersion}".`,
+    };
+  }
+  return { ok: true };
+}
+
+function verifyReviewerCommitSnapshot(
+  snap: { exists: boolean; data?: () => unknown } | null | undefined,
+  expected: ExpectedReviewerCommitCheck
+): { ok: true } | { ok: false; code: ReviewerCommitFailureCode; error: string } {
+  if (!snap || !snap.exists || typeof snap.data !== 'function') {
+    return {
+      ok: false,
+      code: 'reviewer_not_found',
+      error: `Commit check failed: Reviewer "${expected.uid}" profile not found in registry.`,
+    };
+  }
+  try {
+    const rawData = snap.data();
+    const profile = validateReviewerProfile(rawData);
+    return verifyReviewerCommitProfile(profile, expected);
+  } catch (err) {
+    return {
+      ok: false,
+      code: 'reviewer_authorization_revoked',
+      error: `Commit check failed: Malformed reviewer profile: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+}
 
 /**
  * Strict allowlist validation patterns for question IDs and content digests.
@@ -98,6 +215,12 @@ export class MemoryApprovalRecordRepository implements ApprovalRecordRepository 
   // Mutex per questionId for race condition prevention
   private readonly locks = new Map<string, Promise<void>>();
 
+  constructor(private reviewerRegistry?: ReviewerRegistry) {}
+
+  setReviewerRegistry(registry: ReviewerRegistry): void {
+    this.reviewerRegistry = registry;
+  }
+
   private async acquireLock(questionId: string): Promise<() => void> {
     while (this.locks.has(questionId)) {
       await this.locks.get(questionId);
@@ -142,7 +265,7 @@ export class MemoryApprovalRecordRepository implements ApprovalRecordRepository 
 
   async saveApproval(
     record: ServerApprovalRecord,
-    options?: { expectedCurrentVersion?: string }
+    options?: SaveApprovalOptions
   ): Promise<SaveApprovalOutcome> {
     if (typeof record.questionId !== 'string' || !QUESTION_ID_REGEX.test(record.questionId)) {
       return {
@@ -165,6 +288,14 @@ export class MemoryApprovalRecordRepository implements ApprovalRecordRepository 
 
     const release = await this.acquireLock(questionId);
     try {
+      if (options?.expectedReviewer && this.reviewerRegistry) {
+        const profile = await this.reviewerRegistry.getReviewerByUid(options.expectedReviewer.uid);
+        const check = verifyReviewerCommitProfile(profile, options.expectedReviewer);
+        if (!check.ok) {
+          return check;
+        }
+      }
+
       const currentActiveKey = this.activeKeyByQuestionId.get(questionId);
       const currentActive = currentActiveKey ? this.recordsByDigest.get(currentActiveKey) : null;
 
@@ -284,7 +415,8 @@ export class MemoryApprovalRecordRepository implements ApprovalRecordRepository 
   async revokeApproval(
     questionId: string,
     contentDigest: string,
-    revocation: { revokedBy: string; reason: string }
+    revocation: { revokedBy: string; reason: string },
+    options?: RevokeApprovalOptions
   ): Promise<RevokeApprovalOutcome> {
     if (typeof questionId !== 'string' || !QUESTION_ID_REGEX.test(questionId)) {
       return {
@@ -307,6 +439,14 @@ export class MemoryApprovalRecordRepository implements ApprovalRecordRepository 
 
     const release = await this.acquireLock(qId);
     try {
+      if (options?.expectedReviewer && this.reviewerRegistry) {
+        const profile = await this.reviewerRegistry.getReviewerByUid(options.expectedReviewer.uid);
+        const check = verifyReviewerCommitProfile(profile, options.expectedReviewer);
+        if (!check.ok) {
+          return check;
+        }
+      }
+
       const record = this.recordsByDigest.get(recordKey);
       if (!record) {
         return {
@@ -401,7 +541,7 @@ export class UnavailableApprovalRecordRepository implements ApprovalRecordReposi
     return null;
   }
 
-  async saveApproval(_record: ServerApprovalRecord, _options?: { expectedCurrentVersion?: string }): Promise<SaveApprovalOutcome> {
+  async saveApproval(_record: ServerApprovalRecord, _options?: SaveApprovalOptions): Promise<SaveApprovalOutcome> {
     return {
       ok: false,
       code: 'repository_unavailable',
@@ -409,7 +549,12 @@ export class UnavailableApprovalRecordRepository implements ApprovalRecordReposi
     };
   }
 
-  async revokeApproval(_questionId: string, _contentDigest: string, _revocation: { revokedBy: string; reason: string }): Promise<RevokeApprovalOutcome> {
+  async revokeApproval(
+    _questionId: string,
+    _contentDigest: string,
+    _revocation: { revokedBy: string; reason: string },
+    _options?: RevokeApprovalOptions
+  ): Promise<RevokeApprovalOutcome> {
     return {
       ok: false,
       code: 'repository_unavailable',
@@ -436,11 +581,16 @@ export class UnavailableApprovalRecordRepository implements ApprovalRecordReposi
 export class FirestoreApprovalRecordRepository implements ApprovalRecordRepository {
   constructor(
     private readonly db: QuotaFirestore,
-    private readonly collectionName: string = APPROVAL_COLLECTION
+    private readonly collectionName: string = APPROVAL_COLLECTION,
+    private readonly reviewerCollectionName: string = 'trustedReviewers'
   ) {}
 
   private ref(docId: string): unknown {
     return this.db.collection(this.collectionName).doc(docId);
+  }
+
+  private reviewerRef(uid: string): unknown {
+    return this.db.collection(this.reviewerCollectionName).doc(uid);
   }
 
   private refPath(fullPath: string): unknown {
@@ -504,7 +654,7 @@ export class FirestoreApprovalRecordRepository implements ApprovalRecordReposito
 
   async saveApproval(
     record: ServerApprovalRecord,
-    options?: { expectedCurrentVersion?: string }
+    options?: SaveApprovalOptions
   ): Promise<SaveApprovalOutcome> {
     if (!this.db) {
       return {
@@ -533,12 +683,24 @@ export class FirestoreApprovalRecordRepository implements ApprovalRecordReposito
     const contentDigest = record.contentDigest;
     const activeRef = this.ref(activeApprovalDocId(questionId));
     const versionRef = this.ref(versionApprovalDocId(questionId, contentDigest));
+    const reviewerRef = options?.expectedReviewer
+      ? this.reviewerRef(options.expectedReviewer.uid)
+      : null;
 
     try {
       return await this.db.runTransaction(async (tx) => {
-        // Step 1: Read active pointer and version documents (O(1) reads; NO audit log document reads!)
+        // Step 1: Read active pointer and version documents (all reads before writes!)
         const activeSnap = await tx.get(activeRef);
         const versionSnap = await tx.get(versionRef);
+        const reviewerSnap = reviewerRef ? await tx.get(reviewerRef) : null;
+
+        // Verify reviewer commit authorization immediately in the read phase
+        if (options?.expectedReviewer) {
+          const reviewerCheck = verifyReviewerCommitSnapshot(reviewerSnap, options.expectedReviewer);
+          if (!reviewerCheck.ok) {
+            return reviewerCheck;
+          }
+        }
 
         const activeData = activeSnap.exists && typeof activeSnap.data === 'function'
           ? (activeSnap.data() as Record<string, unknown>)
@@ -767,7 +929,8 @@ export class FirestoreApprovalRecordRepository implements ApprovalRecordReposito
   async revokeApproval(
     questionId: string,
     contentDigest: string,
-    revocation: { revokedBy: string; reason: string }
+    revocation: { revokedBy: string; reason: string },
+    options?: RevokeApprovalOptions
   ): Promise<RevokeApprovalOutcome> {
     if (!this.db) {
       return {
@@ -796,10 +959,13 @@ export class FirestoreApprovalRecordRepository implements ApprovalRecordReposito
     const digest = contentDigest;
     const activeRef = this.ref(activeApprovalDocId(qId));
     const versionRef = this.ref(versionApprovalDocId(qId, digest));
+    const reviewerRef = options?.expectedReviewer
+      ? this.reviewerRef(options.expectedReviewer.uid)
+      : null;
 
     try {
       return await this.db.runTransaction(async (tx) => {
-        // Step 1: Read version and active pointer
+        // Step 1: Read version, reviewer, and active pointer (all reads before writes!)
         const versionSnap = await tx.get(versionRef);
         if (!versionSnap.exists || typeof versionSnap.data !== 'function') {
           return {
@@ -807,6 +973,14 @@ export class FirestoreApprovalRecordRepository implements ApprovalRecordReposito
             code: 'record_not_found',
             error: `Approval record for question "${qId}" and digest "${digest}" was not found.`,
           };
+        }
+
+        const reviewerSnap = reviewerRef ? await tx.get(reviewerRef) : null;
+        if (options?.expectedReviewer) {
+          const reviewerCheck = verifyReviewerCommitSnapshot(reviewerSnap, options.expectedReviewer);
+          if (!reviewerCheck.ok) {
+            return reviewerCheck;
+          }
         }
 
         const versionData = versionSnap.data() as Record<string, unknown>;

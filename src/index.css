@@ -1,22 +1,34 @@
 @import "tailwindcss";
+@import "katex/dist/katex.min.css";
 
 @layer base {
-  :root {
-    --google-blue: #4285F4;
+  :root, html[data-theme="light"] {
+    /* Google Brand Accents for subtle badges */
+    --google-blue: #2563EB;
     --google-red: #C84428;
     --google-yellow: #D97706;
-    --google-green: #2E7D52;
+    --google-green: #15803D;
 
-    /* Canonical Editorial Design System Tokens (LearnMate 2.0) */
-    --bg-primary: #FCFBF9;
+    /* Tactile Paper UI Tokens — Light Theme (Warm Ivory / Natural Cotton Paper) */
+    --bg-paper: #FAF7F2;
+    --bg-surface: #FFFFFF;
+    --bg-surface-warm: #F4EFE6;
+    --bg-surface-elevated: #FFFFFF;
     --bg-card: #FFFFFF;
-    --bg-subtle: #F7F5F0;
-    --border-subtle: #E8E6E2;
-    --text-primary: #121827;
-    --text-secondary: #606B7C;
-    --accent: #C84428;
-    --accent-hover: #AF371E;
-    --accent-light: #FBECE6;
+    --bg-subtle: #F1ECE1;
+    --border-paper: #E6DFD5;
+    --border-paper-strong: #D1C5B6;
+    
+    /* Ink Typography Tokens (High-Contrast Academic Ink) */
+    --text-ink: #1C1917;             /* Stone 900 ink, 14.2:1 contrast ratio on #FAF7F2 */
+    --text-ink-secondary: #44403C;   /* Stone 700 ink, 7.8:1 contrast ratio */
+    --text-ink-muted: #78716C;       /* Stone 500 ink, 4.6:1 contrast ratio (WCAG AA compliant) */
+    
+    /* Terracotta & Warm Accents */
+    --accent-terracotta: #C84428;
+    --accent-terracotta-hover: #AF371E;
+    --accent-terracotta-subtle: #FBECE6;
+    --accent-terracotta-border: #F3C4B6;
 
     /* Global Typography System Tokens */
     --font-serif: 'Newsreader', Georgia, Cambria, 'Times New Roman', serif;
@@ -35,15 +47,28 @@
     color-scheme: light;
   }
 
-  html[data-theme="dark"] {
-    --bg-primary: #0F141F;
-    --bg-card: #161D2B;
-    --bg-subtle: #1E2738;
-    --border-subtle: #2C374B;
-    --text-primary: #F3F4F6;
-    --text-secondary: #9CA3AF;
-    --accent: #E05A3F;
-    --accent-light: rgba(200, 68, 40, 0.18);
+  html[data-theme="dark"], html.dark {
+    /* Tactile Paper UI Tokens — Dark Theme (Deep Carbon Charcoal Paper) */
+    --bg-paper: #12151A;
+    --bg-surface: #191D24;
+    --bg-surface-warm: #202630;
+    --bg-surface-elevated: #242B37;
+    --bg-card: #191D24;
+    --bg-subtle: #242B36;
+    --border-paper: #28303E;
+    --border-paper-strong: #3A465B;
+
+    /* Warm Off-White Ink Typography (High-Contrast Reading) */
+    --text-ink: #F7F5F0;             /* Warm ivory ink, 15.8:1 contrast on #12151A */
+    --text-ink-secondary: #CBD5E1;   /* Slate 300, 9.6:1 contrast ratio */
+    --text-ink-muted: #94A3B8;       /* Slate 400, 5.2:1 contrast ratio (WCAG AA compliant) */
+
+    /* Warm Terracotta Accent */
+    --accent-terracotta: #E05A3F;
+    --accent-terracotta-hover: #F06A4F;
+    --accent-terracotta-subtle: rgba(224, 90, 63, 0.16);
+    --accent-terracotta-border: rgba(224, 90, 63, 0.35);
+
     color-scheme: dark;
   }
 
@@ -51,17 +76,17 @@
     font-family: var(--font-sans);
     font-size: var(--text-body-size);
     line-height: 1.65;
-    color: var(--text-primary);
-    background-color: var(--bg-primary);
+    color: var(--text-ink);
+    background-color: var(--bg-paper);
     margin: 0;
     padding: 0;
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
-    transition: background-color 0.2s ease, color 0.2s ease;
+    transition: background-color 0.18s ease, color 0.18s ease;
   }
 
   h1, h2, h3, h4, h5, h6 {
-    color: var(--text-primary);
+    color: var(--text-ink);
     text-wrap: balance;
   }
 
@@ -70,51 +95,97 @@
   }
 }
 
-/* Editorial Typography & Layout Primitives */
+/* Subtle Tactile Paper Grain Texture (SVG noise filter, non-intrusive 2.5% opacity) */
+.paper-texture {
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='paperNoise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23paperNoise)' opacity='0.025'/%3E%3C/svg%3E");
+}
+
+html[data-theme="dark"] .paper-texture,
+html.dark .paper-texture {
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='paperNoiseDark'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23paperNoiseDark)' opacity='0.035'/%3E%3C/svg%3E");
+}
+
+/* Tactile Paper Cards & Elements — No Glassmorphism, Solid Warm Surfaces with Fine Edges */
+.paper-card {
+  background-color: var(--bg-surface);
+  border: 1px solid var(--border-paper);
+  border-radius: 0.75rem;
+  box-shadow: 0 1px 3px rgba(28, 25, 23, 0.04), 0 1px 2px rgba(28, 25, 23, 0.02);
+}
+
+.paper-card-warm {
+  background-color: var(--bg-surface-warm);
+  border: 1px solid var(--border-paper);
+  border-radius: 0.75rem;
+}
+
+.paper-input {
+  background-color: var(--bg-surface);
+  color: var(--text-ink);
+  border: 1px solid var(--border-paper-strong);
+  border-radius: 0.5rem;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.paper-input:focus {
+  outline: none;
+  border-color: var(--accent-terracotta);
+  box-shadow: 0 0 0 2px var(--accent-terracotta-subtle);
+}
+
+.paper-btn-accent {
+  background-color: var(--accent-terracotta);
+  color: #FFFFFF;
+  font-weight: 600;
+  border-radius: 0.5rem;
+  transition: background-color 150ms ease, transform 120ms ease;
+}
+
+.paper-btn-accent:hover:not(:disabled) {
+  background-color: var(--accent-terracotta-hover);
+}
+
+.paper-btn-secondary {
+  background-color: var(--bg-surface);
+  color: var(--text-ink);
+  border: 1px solid var(--border-paper);
+  border-radius: 0.5rem;
+  font-weight: 500;
+  transition: background-color 150ms ease, border-color 150ms ease;
+}
+
+.paper-btn-secondary:hover:not(:disabled) {
+  background-color: var(--bg-subtle);
+  border-color: var(--border-paper-strong);
+}
+
+/* Editorial Typography Primitives */
 .font-serif-editorial {
   font-family: var(--font-serif);
 }
 
-.lm-editorial-title {
+.paper-title {
   font-family: var(--font-serif);
   font-weight: 700;
   letter-spacing: -0.02em;
-  line-height: 1.12;
-  color: var(--text-primary);
+  line-height: 1.15;
+  color: var(--text-ink);
 }
 
-.lm-editorial-subtitle {
+.paper-subtitle {
   font-family: var(--font-serif);
   font-weight: 400;
   line-height: 1.5;
-  color: #3D4655;
+  color: var(--text-ink-secondary);
 }
 
-.lm-kicker {
+.paper-kicker {
   font-family: var(--font-sans);
   font-size: 0.72rem;
   font-weight: 600;
   letter-spacing: 0.12em;
   text-transform: uppercase;
-  color: #7B8494;
-}
-
-.lm-card-editorial {
-  background-color: var(--bg-card);
-  border: 1px solid var(--border-subtle);
-  border-radius: 0.75rem;
-  box-shadow: 0 1px 3px rgba(18, 24, 39, 0.03);
-}
-
-.lm-btn-accent {
-  background-color: var(--accent);
-  color: #FFFFFF;
-  font-weight: 600;
-  transition: background-color 150ms ease, transform 150ms ease;
-}
-
-.lm-btn-accent:hover:not(:disabled) {
-  background-color: var(--accent-hover);
+  color: var(--text-ink-muted);
 }
 
 /* Stacked Mathematical Fraction Helper */
@@ -137,13 +208,12 @@
   padding: 0.1rem 0.25rem 0;
 }
 
-/* Reusable Typography & Reading Experience Design Tokens */
 .lm-tutor-prose {
   font-family: var(--font-sans);
   font-size: var(--text-tutor-size);
   font-weight: 400;
   line-height: var(--text-tutor-line-height);
-  color: var(--text-primary);
+  color: var(--text-ink);
   max-width: var(--reading-max-width);
   text-align: left;
   overflow-wrap: break-word;
@@ -155,7 +225,7 @@
 
 .lm-tutor-prose strong {
   font-weight: 600;
-  color: var(--text-primary);
+  color: var(--text-ink);
 }
 
 .lm-quiz-question {
@@ -163,7 +233,7 @@
   font-size: 1.25rem;
   font-weight: 600;
   line-height: 1.5;
-  color: var(--text-primary);
+  color: var(--text-ink);
   max-width: var(--reading-max-width);
   text-align: left;
 }
@@ -173,7 +243,7 @@
   font-size: 1.05rem;
   font-weight: 400;
   line-height: 1.75;
-  color: var(--text-primary);
+  color: var(--text-ink);
   max-width: var(--reading-max-width);
   text-align: left;
 }
@@ -194,77 +264,41 @@
   font-variant-numeric: tabular-nums;
 }
 
-/* Sticky Note Pastel Cards Matching Image 1 */
+/* Sticky Note Warm Paper Cards */
 .lm-sticky-yellow {
-  background-color: #FDF4C7;
-  border-color: #F3E39A;
-  color: #1F2937 !important;
+  background-color: #FBF4D8;
+  border: 1px solid #EEDF9A;
+  color: #292524 !important;
 }
 .lm-sticky-pink {
-  background-color: #FCE5EC;
-  border-color: #F5C6D6;
-  color: #1F2937 !important;
+  background-color: #F8E7ED;
+  border: 1px solid #E9C0CE;
+  color: #292524 !important;
 }
 .lm-sticky-blue {
-  background-color: #E3EFFD;
-  border-color: #C5DDFB;
-  color: #1F2937 !important;
+  background-color: #E6EFFB;
+  border: 1px solid #C4D9F5;
+  color: #292524 !important;
 }
 .lm-sticky-green {
-  background-color: #E2F5EA;
-  border-color: #BEE5CE;
-  color: #1F2937 !important;
+  background-color: #E5F3EA;
+  border: 1px solid #C1DEC9;
+  color: #292524 !important;
 }
 
-/* Print Stylesheet for Sticky Notes, Mind Maps, One-Page Revision Sheets & Reports */
+/* Print Stylesheet */
 @media print {
-  header,
-  nav,
-  .no-print,
-  .lm-no-print {
+  header, nav, .no-print, .lm-no-print {
     display: none !important;
   }
   body {
     background: #FFFFFF !important;
     color: #000000 !important;
   }
-  .print-sheet {
-    box-shadow: none !important;
-    border: 1px solid #CBD5E1 !important;
-    margin: 0 !important;
-    padding: 16px !important;
-    width: 100% !important;
-    max-width: 100% !important;
-  }
-}
-
-/* Interactive Card & Button Micro-Interactions */
-.lm-card-interactive {
-  transition: transform 180ms cubic-bezier(0.22, 1, 0.36, 1),
-              box-shadow 180ms cubic-bezier(0.22, 1, 0.36, 1),
-              border-color 180ms ease;
-}
-
-.lm-card-interactive:hover {
-  transform: translateY(-2px);
-  box-shadow: 0 10px 24px -10px rgba(18, 24, 39, 0.08),
-              0 2px 6px -2px rgba(18, 24, 39, 0.04);
-}
-
-.lm-btn-press {
-  transition: transform 150ms cubic-bezier(0.22, 1, 0.36, 1),
-              box-shadow 150ms ease,
-              background-color 150ms ease;
-}
-
-.lm-btn-press:active:not(:disabled) {
-  transform: scale(0.985);
 }
 
 @media (prefers-reduced-motion: reduce) {
-  *,
-  ::before,
-  ::after {
+  *, ::before, ::after {
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;

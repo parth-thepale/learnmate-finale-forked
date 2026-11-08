@@ -54,3 +54,6 @@ jobs:
 
       - name: Firestore approval repository integration tests (Emulator)
         run: npx --yes firebase-tools@15.34.2 emulators:exec --only firestore --project demo-learnmate-rules "tsx --test firestore-tests/firestoreApprovalRepository.emulator.test.ts"
+
+      - name: Firestore reviewer authority integration tests (Emulator)
+        run: npm run test:reviewer-authority:emulator

@@ -1,18 +1,18 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { Navbar, ActiveTab } from './components/Navbar';
-import { HomeView } from './components/HomeView';
+import { PaperHomeView } from './components/PaperHomeView';
+import { PaperSessionView } from './components/PaperSessionView';
+import { ChaptersView } from './components/ChaptersView';
+import { RoadmapsView } from './components/RoadmapsView';
+import { ProfileView } from './components/ProfileView';
 import { StudyView, StudySubMode } from './components/StudyView';
 import { QuickReviseView } from './components/QuickReviseView';
 import { PracticeWorkspaceView } from './components/PracticeWorkspaceView';
-import { PdfWorkspaceView } from './components/PdfWorkspaceView';
 import { ExploreWorkspaceView, ExploreSubTab } from './components/ExploreWorkspaceView';
 import { CreativeStudioView } from './components/CreativeStudioView';
-import { StudentDashboardView } from './components/StudentDashboardView';
 import { StudentProfileModal } from './components/StudentProfileModal';
-import { ProgressView } from './components/ProgressView';
 import { VoiceTutorModal } from './components/VoiceTutorModal';
 import { NotebookAndScannerModal } from './components/NotebookAndScannerModal';
-import { DynamicCompanion } from './components/DynamicCompanion';
 import { SignOutDialog } from './components/SignOutDialog';
 import { performSignOut, prepareSignOutSummary, type SignOutChoice, type SignOutSummary } from './services/signOutFlow';
 import { isFeatureEnabled, isTabAvailable } from './config/launchFeatures';
@@ -23,10 +23,21 @@ import {
 } from './types/study';
 import { studyStorage } from './services/storageService';
 import { createFirestoreCloudStore } from './services/firestoreCloudStore';
+import { RoadmapSyncService } from './features/roadmaps/services/roadmapSyncService';
+import { RoadmapOutboxService } from './features/roadmaps/services/roadmapOutboxService';
+import {
+  roadmapSyncCoordinator,
+  type UnifiedSyncStatus,
+} from './features/roadmaps/services/roadmapSyncCoordinator';
 import type { SyncSnapshot } from './services/syncStatus';
 import { extractPagesFromPdf } from './utils/pdfExtractor';
 import { aiStudyClient } from './services/aiClient';
 import { splitTextIntoPages } from './utils/quizGrading';
+import { getInitialTheme, applyTheme, type Theme } from './utils/theme';
+import type { SyllabusChapter, JeeSubjectId } from './data/jeeMainSyllabus';
+import { getChapter } from './data/jeeMainSyllabus';
+import { getChapterContent } from './services/chapterContentProvider';
+import type { ActiveChapterSessionContext } from './components/PaperSessionView';
 import {
   auth,
   db,
@@ -48,6 +59,11 @@ function sameSyncSnapshot(a: SyncSnapshot, b: SyncSnapshot): boolean {
 }
 
 const VALID_TABS: ActiveTab[] = [
+  'home',
+  'chapters',
+  'sessions',
+  'mocks',
+  'roadmaps',
   'dashboard',
   'study',
   'revision',
@@ -55,24 +71,26 @@ const VALID_TABS: ActiveTab[] = [
   'explore',
   'ai-tutor',
   'create',
-  'home',
   'pdf-workspace',
-  'analytics'
+  'analytics',
+  'profile'
 ];
 
 function parseTabFromHash(): ActiveTab {
-  if (typeof window === 'undefined') return 'dashboard';
+  if (typeof window === 'undefined') return 'home';
   const raw = window.location.hash.replace(/^#\/?/, '').trim().toLowerCase();
-  if (raw === 'learn') return 'study';
-  if (raw === 'saved') return 'analytics';
+  if (raw === 'learn') return 'sessions';
+  if (raw === 'saved') return 'profile';
   if (VALID_TABS.includes(raw as ActiveTab) && isTabAvailable(raw)) {
     return raw as ActiveTab;
   }
-  return 'dashboard';
+  return 'home';
 }
 
 export function App() {
   const [activeTab, setActiveTab] = useState<ActiveTab>(() => parseTabFromHash());
+  const [theme, setTheme] = useState<Theme>(() => getInitialTheme());
+  const [dynamicEdgeOpen, setDynamicEdgeOpen] = useState(false);
   const [studyInitialMode, setStudyInitialMode] = useState<StudySubMode>('explain');
   const [exploreSubTab, setExploreSubTab] = useState<ExploreSubTab>('news');
   const [documents, setDocuments] = useState<StudyDocument[]>([]);
@@ -80,7 +98,7 @@ export function App() {
   const [isProcessing, setIsProcessing] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
-  // Student Personalization Profile state
+  // Student Profile state
   const [studentProfile, setStudentProfile] = useState<StudentAcademicProfile>(() =>
     studyStorage.getStudentProfile()
   );
@@ -104,15 +122,48 @@ export function App() {
   const [isAuthReady, setIsAuthReady] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
   const [syncSnapshot, setSyncSnapshot] = useState<SyncSnapshot>(() => studyStorage.getSyncSnapshot());
-  // Bumped whenever the local account scope changes so that every data view remounts and no
-  // state from the previous account survives on screen.
+  const [roadmapSyncStatus, setRoadmapSyncStatus] = useState<UnifiedSyncStatus>(() =>
+    roadmapSyncCoordinator.getStatus()
+  );
   const [scopeEpoch, setScopeEpoch] = useState(0);
   const authUidRef = useRef<string | null>(null);
 
+  const [activeChapterSession, setActiveChapterSession] = useState<ActiveChapterSessionContext | null>(() => {
+    try {
+      const sessions = studyStorage.getStudySessions();
+      const latest = sessions[0];
+      if (latest && latest.chapterId && latest.subjectId) {
+        const ch = getChapter(latest.chapterId);
+        if (ch) {
+          return {
+            subjectId: latest.subjectId,
+            chapter: ch,
+            content: getChapterContent(latest.subjectId, ch),
+            session: latest,
+          };
+        }
+      }
+    } catch {
+      // ignore
+    }
+    return null;
+  });
+
   const effectiveDoc = activeDoc || documents[0] || studyStorage.getDocuments()[0];
 
+  // Theme synchronization
+  useEffect(() => {
+    applyTheme(theme);
+  }, [theme]);
+
+  const handleToggleTheme = () => {
+    const next: Theme = theme === 'light' ? 'dark' : 'light';
+    setTheme(next);
+    applyTheme(next);
+  };
+
   const handleSelectTab = (requestedTab: ActiveTab) => {
-    const tab: ActiveTab = isTabAvailable(requestedTab) ? requestedTab : 'dashboard';
+    const tab: ActiveTab = isTabAvailable(requestedTab) ? requestedTab : 'home';
     setActiveTab(tab);
     if (typeof window !== 'undefined') {
       const targetHash = `#${tab}`;
@@ -141,15 +192,31 @@ export function App() {
     setStudentProfile(studyStorage.getStudentProfile());
   }, []);
 
+  // Load initial local storage data immediately so local-first UI is responsive instantly
   useEffect(() => {
+    loadStateFromStorage();
+    const fallbackTimer = setTimeout(() => {
+      setIsAuthReady(true);
+    }, 350);
+    return () => clearTimeout(fallbackTimer);
+  }, [loadStateFromStorage]);
+
+  useEffect(() => {
+    const cloud = createFirestoreCloudStore(db);
+
     const unsubscribeStorage = studyStorage.subscribe(() => {
       const next = studyStorage.getSyncSnapshot();
       setSyncSnapshot((prev) => (sameSyncSnapshot(prev, next) ? prev : next));
     });
 
+    const unsubscribeRoadmapSync = roadmapSyncCoordinator.subscribeStatus((status) => {
+      setRoadmapSyncStatus(status);
+    });
+
     const unsubscribeAuth = onAuthStateChanged(auth, (currentUser) => {
       const previousScope = studyStorage.getActiveScope();
       studyStorage.activateAccount(currentUser);
+      const prevUid = authUidRef.current;
       authUidRef.current = currentUser?.uid ?? null;
       if (studyStorage.getActiveScope() !== previousScope) {
         setScopeEpoch((epoch) => epoch + 1);
@@ -159,18 +226,39 @@ export function App() {
       setSyncSnapshot(studyStorage.getSyncSnapshot());
       setIsAuthReady(true);
 
+      // Root-level sync lifecycle coordinator
+      roadmapSyncCoordinator.setUser(
+        currentUser,
+        cloud,
+        typeof window !== 'undefined' ? window.localStorage : undefined
+      );
+
       if (currentUser) {
         setIsSyncing(true);
-        studyStorage
-          .syncWithCloudUser(currentUser)
+        (async () => {
+          if (typeof window !== 'undefined') {
+            await RoadmapSyncService.migrateGuestRoadmapDataToUser(
+              currentUser.uid,
+              window.localStorage,
+              cloud
+            ).catch((err) => console.warn('Guest roadmap migration error:', err));
+          }
+          await Promise.all([
+            studyStorage.syncWithCloudUser(currentUser),
+            roadmapSyncCoordinator.triggerSync(),
+          ]);
+        })()
           .catch((err) => console.error('Error syncing with Firestore:', err))
           .finally(() => {
-            // Ignore results for an account that is no longer signed in.
             if (authUidRef.current !== currentUser.uid) return;
             loadStateFromStorage();
             setIsSyncing(false);
           });
       } else {
+        // Transitioning to guest session: restore any unconfirmed migration backup
+        if (typeof window !== 'undefined') {
+          RoadmapSyncService.restoreFromGuestMigrationBackup(window.localStorage, { previousUid: prevUid });
+        }
         setIsSyncing(false);
       }
     });
@@ -178,14 +266,34 @@ export function App() {
     return () => {
       unsubscribeAuth();
       unsubscribeStorage();
+      unsubscribeRoadmapSync();
     };
   }, [loadStateFromStorage]);
 
-  // Explicit sign-out asks what to do with this account's local data (keep is the default).
+  const handleLogin = async () => {
+    setErrorMessage(null);
+    try {
+      await signInWithGoogle();
+    } catch (err: any) {
+      if (err?.code === 'auth/popup-closed-by-user' || err?.code === 'auth/cancelled-popup-request') {
+        return;
+      }
+      setErrorMessage(
+        err?.message || 'Google sign-in could not be completed. You can continue studying in local guest mode.'
+      );
+    }
+  };
+
   const handleLogout = async () => {
     if (!user) return;
     setSignOutError(null);
-    setSignOutSummary(await prepareSignOutSummary(studyStorage, user));
+    const cloud = createFirestoreCloudStore(db);
+    setSignOutSummary(
+      await prepareSignOutSummary(studyStorage, user, {
+        cloud,
+        customStorage: typeof window !== 'undefined' ? window.localStorage : undefined,
+      })
+    );
   };
 
   const handleSignOutChoice = useCallback(
@@ -197,7 +305,15 @@ export function App() {
       }
       setSignOutBusy(true);
       setSignOutError(null);
-      const result = await performSignOut({ choice, uid: signOutSummary.uid, storage: studyStorage, signOut: signOutUser });
+      const cloud = createFirestoreCloudStore(db);
+      const result = await performSignOut({
+        choice,
+        uid: signOutSummary.uid,
+        storage: studyStorage,
+        signOut: signOutUser,
+        cloud,
+        customStorage: typeof window !== 'undefined' ? window.localStorage : undefined,
+      });
       setSignOutBusy(false);
       if (result.status === 'failed') {
         setSignOutError(result.error);
@@ -208,7 +324,6 @@ export function App() {
     [signOutSummary]
   );
 
-  // If the account changes while the dialog is open (e.g. signed out in another tab), close it.
   useEffect(() => {
     if (signOutSummary && !signOutBusy && user?.uid !== signOutSummary.uid) setSignOutSummary(null);
   }, [user, signOutSummary, signOutBusy]);
@@ -264,8 +379,7 @@ export function App() {
       const updatedDocs = studyStorage.getDocuments();
       setDocuments(updatedDocs);
       setActiveDoc(newDoc);
-      setStudyInitialMode('explain');
-      handleSelectTab('study');
+      handleSelectTab('sessions');
     } catch (err: any) {
       setErrorMessage(err?.message || 'Failed to process PDF file.');
     } finally {
@@ -280,12 +394,9 @@ export function App() {
     youtubeUrl?: string
   ) => {
     setErrorMessage(null);
-
     const cleaned = rawText.trim();
     if (cleaned.length < 25) {
-      setErrorMessage(
-        'Please enter at least a paragraph of study notes so LearnMate can analyze it.'
-      );
+      setErrorMessage('Please enter at least a paragraph of study notes.');
       return;
     }
 
@@ -316,8 +427,7 @@ export function App() {
       const updatedDocs = studyStorage.getDocuments();
       setDocuments(updatedDocs);
       setActiveDoc(newDoc);
-      setStudyInitialMode('explain');
-      handleSelectTab('study');
+      handleSelectTab('sessions');
     } catch (err: any) {
       setErrorMessage(err?.message || 'Failed to analyze study notes.');
     } finally {
@@ -329,7 +439,7 @@ export function App() {
     setErrorMessage(null);
     const trimmed = url.trim();
     if (!trimmed) {
-      setErrorMessage('Please enter a valid YouTube lecture URL or topic.');
+      setErrorMessage('Please enter a valid YouTube lecture URL.');
       return;
     }
 
@@ -353,8 +463,7 @@ export function App() {
       studyStorage.setActiveDocumentId(newDoc.id);
       setDocuments(studyStorage.getDocuments());
       setActiveDoc(newDoc);
-      setStudyInitialMode('explain');
-      handleSelectTab('study');
+      handleSelectTab('sessions');
     } catch (err: any) {
       setErrorMessage(err?.message || 'Failed to import YouTube lecture.');
     } finally {
@@ -362,10 +471,7 @@ export function App() {
     }
   };
 
-  const handleSelectDocument = (
-    doc: StudyDocument,
-    targetMode: StudySubMode = 'explain'
-  ) => {
+  const handleSelectDocument = (doc: StudyDocument) => {
     const updated: StudyDocument = {
       ...doc,
       lastStudiedAt: new Date().toISOString()
@@ -374,17 +480,25 @@ export function App() {
     studyStorage.setActiveDocumentId(updated.id);
     setDocuments(studyStorage.getDocuments());
     setActiveDoc(updated);
-    setStudyInitialMode(targetMode);
-    handleSelectTab('study');
+    handleSelectTab('sessions');
   };
 
-  const handleDeleteDocument = (docId: string) => {
-    studyStorage.deleteDocument(docId);
-    const remaining = studyStorage.getDocuments();
-    setDocuments(remaining);
-    if (activeDoc?.id === docId) {
-      setActiveDoc(remaining[0] || null);
-    }
+  const handleStartSessionForChapter = (subjectId: JeeSubjectId, chapter: SyllabusChapter) => {
+    const content = getChapterContent(subjectId, chapter);
+    const newSession = studyStorage.createStudySession({
+      name: `${chapter.name} Session`,
+      subjectId,
+      chapterId: chapter.id,
+      topicIds: chapter.topics.map((t) => t.id),
+      resourceIds: activeDoc ? [activeDoc.id] : [],
+    });
+    setActiveChapterSession({
+      subjectId,
+      chapter,
+      content,
+      session: newSession,
+    });
+    handleSelectTab('sessions');
   };
 
   const handleMarkNotificationsRead = () => {
@@ -393,248 +507,172 @@ export function App() {
   };
 
   return (
-    <div className="min-h-screen flex flex-col bg-[#FCFBF9] text-[#121827] pt-16">
-      {/* True Glassmorphic Top Strip (Clear frosted glass, no colored background) */}
-      <div
-        className="fixed top-0 left-0 right-0 h-16 z-30 bg-white/10 dark:bg-white/[0.04] backdrop-blur-2xl backdrop-saturate-150 border-b border-black/[0.06] dark:border-white/[0.08] shadow-[0_4px_30px_rgba(0,0,0,0.02)] pointer-events-none transition-colors"
-        aria-hidden="true"
-      />
-      {isAuthReady && <DynamicCompanion key={`companion-${scopeEpoch}`} activeDoc={effectiveDoc} />}
+    <div className="min-h-screen flex flex-col bg-[var(--bg-paper)] text-[var(--text-ink)] paper-texture transition-colors">
+      
+      {/* 1. Minimal Horizontal Navbar with Capsule Navigation & Dynamic Edge */}
       <Navbar
         activeTab={activeTab}
         onSelectTab={handleSelectTab}
         hasActiveDoc={!!activeDoc}
         activeDoc={activeDoc}
-        onOpenNotebookModal={() => {
-          setNotebookInitialTab('scan');
-          setNotebookModalOpen(true);
-        }}
         user={user}
         isAuthReady={isAuthReady}
         isSyncing={isSyncing}
         syncSnapshot={syncSnapshot}
-        onLogin={signInWithGoogle}
+        roadmapSyncStatus={roadmapSyncStatus}
+        onRetryFailedRoadmapSync={() => {
+          void roadmapSyncCoordinator.retry();
+          void studyStorage.retrySync();
+        }}
+        onLogin={handleLogin}
         onLogout={handleLogout}
         documents={documents}
-        onSelectDocumentFromSearch={(doc) => handleSelectDocument(doc, 'explain')}
+        onSelectDocumentFromSearch={handleSelectDocument}
         notifications={notifications}
         onMarkNotificationsRead={handleMarkNotificationsRead}
         onOpenProfileModal={() => setProfileModalOpen(true)}
         studentProfile={studentProfile}
+        theme={theme}
+        onToggleTheme={handleToggleTheme}
       />
 
-      {/* Main Content Container */}
+      {/* 3. Main Workspace Router */}
       <main className="flex-1" key={`main-${scopeEpoch}`}>
-        {!isAuthReady && (
-          <div role="status" className="max-w-xl mx-auto px-4 py-16 text-center text-sm text-[#606B7C]">
-            Loading your study space…
+        {!isAuthReady ? (
+          <div role="status" className="max-w-xl mx-auto px-4 py-20 text-center text-xs text-[var(--text-ink-muted)]">
+            Loading your study journal…
           </div>
-        )}
-        {isAuthReady && (
-        <>
-        {activeTab === 'home' && (
-          <HomeView
-            documents={documents}
-            onUploadPdf={handleUploadPdf}
-            onSubmitTextNotes={(title, text) => handleSubmitTextNotes(title, text, 'text')}
-            onSubmitYouTubeUrl={handleSubmitYouTubeUrl}
-            onSelectDocument={handleSelectDocument}
-            onNavigateTab={handleSelectTab}
-            onOpenVoiceTutor={() => setVoiceTutorOpen(true)}
-            onOpenNotebookModal={(tab = 'scan') => {
-              setNotebookInitialTab(tab);
-              setNotebookModalOpen(true);
-            }}
-            isProcessing={isProcessing}
-            errorMessage={errorMessage}
-            onClearError={() => setErrorMessage(null)}
-          />
-        )}
+        ) : (
+          <>
+            {/* 1. HOME: Tactile Paper Dashboard (Blueprint Page 1) */}
+            {(activeTab === 'home' || activeTab === 'dashboard') && (
+              <PaperHomeView
+                documents={documents}
+                onUploadPdf={handleUploadPdf}
+                onSubmitTextNotes={(title, text) => handleSubmitTextNotes(title, text, 'text')}
+                onSubmitYouTubeUrl={handleSubmitYouTubeUrl}
+                onSelectDocument={handleSelectDocument}
+                onNavigateTab={handleSelectTab}
+                userName={user?.displayName?.split(' ')[0] || studentProfile.fullName || 'Student'}
+                isProcessing={isProcessing}
+                errorMessage={errorMessage}
+                onClearError={() => setErrorMessage(null)}
+              />
+            )}
 
-        {activeTab === 'dashboard' && (
-          <div className="max-w-[1380px] mx-auto px-4 sm:px-6 lg:px-8 py-6">
-            <StudentDashboardView
-              studentName={
-                user?.displayName
-                  ? user.displayName.split(' ')[0]
-                  : studentProfile.fullName || 'Student'
-              }
-              documents={documents}
-              activeDoc={activeDoc}
-              onSelectDoc={(doc, mode = 'explain') => handleSelectDocument(doc, mode)}
-              onNavigateTab={handleSelectTab}
-              studentProfile={studentProfile}
-              onOpenProfileModal={() => setProfileModalOpen(true)}
-            />
-          </div>
-        )}
+            {/* 2. SESSIONS: The Complete Central Session Workspace (Blueprint Page 2) */}
+            {(activeTab === 'sessions' || activeTab === 'study' || activeTab === 'ai-tutor' || activeTab === 'pdf-workspace') && (
+              <PaperSessionView
+                documents={documents}
+                activeDocument={effectiveDoc}
+                activeChapterSession={activeChapterSession}
+                onSelectDocument={(doc) => {
+                  studyStorage.setActiveDocumentId(doc.id);
+                  setActiveDoc(doc);
+                }}
+                onClearActiveChapter={() => setActiveChapterSession(null)}
+                onUploadPdf={handleUploadPdf}
+                onSubmitYouTubeUrl={handleSubmitYouTubeUrl}
+                onNavigateTab={handleSelectTab}
+                userName={user?.displayName?.split(' ')[0] || studentProfile.fullName || 'Student'}
+                isProcessing={isProcessing}
+              />
+            )}
 
-        {(activeTab === 'study' || activeTab === 'ai-tutor') && activeDoc && (
-          <div className="max-w-[1380px] mx-auto px-4 sm:px-6 lg:px-8 py-5">
-            <StudyView
-              documents={documents}
-              activeDocument={effectiveDoc}
-              onSelectDocument={(doc) => {
-                studyStorage.setActiveDocumentId(doc.id);
-                setActiveDoc(doc);
-              }}
-              initialSubMode={activeTab === 'ai-tutor' ? 'explain' : studyInitialMode}
-              presentationMode={activeTab === 'ai-tutor' ? 'ai-tutor' : 'study-space'}
-              onAttemptSaved={refreshDocumentsState}
-              onNavigateProgress={() => handleSelectTab('dashboard')}
-              onOpenPdfWorkspace={() => handleSelectTab('pdf-workspace')}
-              onOpenUploadModal={() => handleSelectTab('home')}
-              isCloudSynced={!!user && syncSnapshot.state === 'synced'}
-            />
-          </div>
-        )}
+            {/* 3. CHAPTERS: NTA JEE Main 2026 Curriculum Tree (Blueprint Page 3) */}
+            {activeTab === 'chapters' && (
+              <ChaptersView
+                onStartSessionForChapter={handleStartSessionForChapter}
+                onNavigateTab={handleSelectTab}
+              />
+            )}
 
-        {(activeTab === 'study' || activeTab === 'ai-tutor') && !activeDoc && (
-          <div className="max-w-xl mx-auto px-4 py-16 text-center space-y-4">
-            <h2 className="font-serif-editorial text-3xl font-bold text-[#121827]">
-              No Study Document Selected
-            </h2>
-            <p className="text-sm text-[#606B7C]">
-              Upload a PDF or select one of your materials to start studying.
-            </p>
-            <button
-              onClick={() => handleSelectTab('home')}
-              className="px-5 py-2.5 rounded-lg lm-btn-accent text-xs font-semibold cursor-pointer"
-            >
-              Upload Study Material
-            </button>
-          </div>
-        )}
+            {/* 4. MOCKS / PYQS: Verified Exam Practice & Custom Mock Builder (Blueprint Page 1 & 3) */}
+            {(activeTab === 'mocks' || activeTab === 'practice') && (
+              <div className="max-w-[1380px] mx-auto px-4 sm:px-6 py-6">
+                <PracticeWorkspaceView
+                  documents={documents}
+                  activeDoc={activeDoc}
+                  onSelectDoc={(doc) => setActiveDoc(doc)}
+                  onOpenStudyQuiz={() => handleSelectTab('sessions')}
+                  studentProfile={studentProfile}
+                  onOpenProfileModal={() => setProfileModalOpen(true)}
+                />
+              </div>
+            )}
 
-        {activeTab === 'revision' && activeDoc && (
-          <div className="max-w-[1380px] mx-auto px-4 sm:px-6 lg:px-8 py-6">
-            <QuickReviseView
-              activeDocument={effectiveDoc}
-              onNavigateToCitation={(pageNumber) => {
-                setStudyInitialMode('explain');
-                handleSelectTab('study');
-              }}
-              onAskTutorAboutConcept={() => {
-                handleSelectTab('ai-tutor');
-              }}
-            />
-          </div>
-        )}
+            {/* 5. ROADMAPS: Structured Learning Progression Ladders (Blueprint Page 3) */}
+            {activeTab === 'roadmaps' && (
+              <RoadmapsView onNavigateTab={handleSelectTab} user={user} />
+            )}
 
-        {activeTab === 'revision' && !activeDoc && (
-          <div className="max-w-xl mx-auto px-4 py-16 text-center space-y-4">
-            <h2 className="font-serif-editorial text-3xl font-bold text-[#121827]">
-              Select a Material to Revise
-            </h2>
-            <button
-              onClick={() => handleSelectTab('home')}
-              className="px-5 py-2.5 rounded-lg lm-btn-accent text-xs font-semibold cursor-pointer"
-            >
-              Upload Material
-            </button>
-          </div>
-        )}
+            {/* 6. PROFILE: Identity, Quota Usage, Heatmap & Diagnostic Analytics (Blueprint Page 4) */}
+            {(activeTab === 'profile' || activeTab === 'analytics' || (activeTab as string) === 'analysis') && (
+              <ProfileView
+                user={user}
+                studentProfile={studentProfile}
+                onOpenProfileModal={() => setProfileModalOpen(true)}
+                initialTab={activeTab === 'analytics' || (activeTab as string) === 'analysis' ? 'analysis' : undefined}
+              />
+            )}
 
-        {activeTab === 'practice' && (
-          <div className="max-w-[1380px] mx-auto px-4 sm:px-6 lg:px-8 py-6">
-            <PracticeWorkspaceView
-              documents={documents}
-              activeDoc={activeDoc}
-              onSelectDoc={(doc) => setActiveDoc(doc)}
-              onOpenStudyQuiz={() => {
-                if (activeDoc || documents[0]) {
-                  if (!activeDoc && documents[0]) setActiveDoc(documents[0]);
-                  setStudyInitialMode('quiz');
-                  handleSelectTab('study');
-                }
-              }}
-              studentProfile={studentProfile}
-              onOpenProfileModal={() => setProfileModalOpen(true)}
-            />
-          </div>
-        )}
+            {/* Backward-Compatible Auxiliary Tabs */}
+            {activeTab === 'revision' && effectiveDoc && (
+              <div className="max-w-[1380px] mx-auto px-4 sm:px-6 py-6">
+                <QuickReviseView
+                  activeDocument={effectiveDoc}
+                  onNavigateToCitation={() => handleSelectTab('sessions')}
+                  onAskTutorAboutConcept={() => handleSelectTab('sessions')}
+                />
+              </div>
+            )}
 
-        {activeTab === 'explore' && (
-          <div className="max-w-[1380px] mx-auto px-4 sm:px-6 lg:px-8 py-6">
-            <ExploreWorkspaceView
-              activeSubTab={exploreSubTab}
-              onSelectSubTab={setExploreSubTab}
-              activeDoc={activeDoc}
-              onImportAsStudyMaterial={(title, content, sourceType) => {
-                handleSubmitTextNotes(
-                  title,
-                  content,
-                  sourceType === 'youtube' ? 'youtube' : 'text'
-                );
-              }}
-            />
-          </div>
-        )}
+            {activeTab === 'explore' && (
+              <div className="max-w-[1380px] mx-auto px-4 sm:px-6 py-6">
+                <ExploreWorkspaceView
+                  activeSubTab={exploreSubTab}
+                  onSelectSubTab={setExploreSubTab}
+                  activeDoc={activeDoc}
+                  onImportAsStudyMaterial={(title, content, sourceType) => {
+                    handleSubmitTextNotes(
+                      title,
+                      content,
+                      sourceType === 'youtube' ? 'youtube' : 'text'
+                    );
+                  }}
+                />
+              </div>
+            )}
 
-        {activeTab === 'create' && effectiveDoc && (
-          <div className="max-w-[1380px] mx-auto px-4 sm:px-6 lg:px-8 py-5">
-            <CreativeStudioView
-              documents={documents}
-              activeDocument={effectiveDoc}
-              onSelectDocument={(docId) => {
-                const found = documents.find((d) => d.id === docId);
-                if (found) setActiveDoc(found);
-              }}
-              onOpenNotebookModal={(mode) => {
-                setNotebookInitialTab(mode);
-                setNotebookModalOpen(true);
-              }}
-              onGenerateFlashcardsFromNotes={() => {
-                handleSelectTab('revision');
-              }}
-            />
-          </div>
-        )}
-
-        {activeTab === 'pdf-workspace' && (
-          <div className="max-w-[1380px] mx-auto px-4 sm:px-6 lg:px-8 py-6">
-            <PdfWorkspaceView
-              documents={documents}
-              activeDoc={activeDoc}
-              onSelectDoc={(doc) => setActiveDoc(doc)}
-              onUploadClick={() => handleSelectTab('home')}
-              onDeleteDoc={handleDeleteDocument}
-              onDocumentsChanged={refreshDocumentsState}
-              onOpenStudySpace={() => {
-                setStudyInitialMode('explain');
-                handleSelectTab('study');
-              }}
-            />
-          </div>
-        )}
-
-        {activeTab === 'analytics' && (
-          <div className="max-w-[1380px] mx-auto px-4 sm:px-6 lg:px-8 py-6">
-            <ProgressView
-              documents={documents}
-              attempts={studyStorage.getQuizAttempts()}
-              onStartQuizForDocument={(doc, mode) => {
-                handleSelectDocument(doc, mode);
-              }}
-              onResetProgress={() => {
-                studyStorage.clearAllProgress();
-                refreshDocumentsState();
-              }}
-            />
-          </div>
-        )}
-        </>
+            {activeTab === 'create' && effectiveDoc && (
+              <div className="max-w-[1380px] mx-auto px-4 sm:px-6 py-6">
+                <CreativeStudioView
+                  documents={documents}
+                  activeDocument={effectiveDoc}
+                  onSelectDocument={(docId) => {
+                    const found = documents.find((d) => d.id === docId);
+                    if (found) setActiveDoc(found);
+                  }}
+                  onOpenNotebookModal={(mode) => {
+                    setNotebookInitialTab(mode);
+                    setNotebookModalOpen(true);
+                  }}
+                  onGenerateFlashcardsFromNotes={() => handleSelectTab('revision')}
+                />
+              </div>
+            )}
+          </>
         )}
       </main>
 
-      {/* Personalized Student Academic Profile Modal */}
+      {/* Student Academic Profile Modal */}
       {isAuthReady && (
-      <StudentProfileModal
-        key={`profile-${scopeEpoch}`}
-        isOpen={profileModalOpen}
-        onClose={() => setProfileModalOpen(false)}
-        onProfileSaved={(updated) => setStudentProfile(updated)}
-      />
+        <StudentProfileModal
+          key={`profile-${scopeEpoch}`}
+          isOpen={profileModalOpen}
+          onClose={() => setProfileModalOpen(false)}
+          onProfileSaved={(updated) => setStudentProfile(updated)}
+        />
       )}
 
       {/* Live Voice AI Tutor Modal */}
@@ -647,26 +685,31 @@ export function App() {
         />
       )}
 
-      {/* Smart Notebook, OCR Scanner & Voice Recorder Modal */}
+      {/* Smart Notebook, OCR Scanner & Planner Modal */}
       {isAuthReady && (
-      <NotebookAndScannerModal
-        key={`notebook-${scopeEpoch}`}
-        isOpen={notebookModalOpen}
-        initialMode={notebookInitialTab}
-        onClose={() => setNotebookModalOpen(false)}
-        onImportAsStudyDocument={(doc) => {
-          studyStorage.saveDocument(doc);
-          studyStorage.setActiveDocumentId(doc.id);
-          setDocuments(studyStorage.getDocuments());
-          setActiveDoc(doc);
-          setStudyInitialMode('explain');
-          handleSelectTab('study');
-        }}
-      />
+        <NotebookAndScannerModal
+          key={`notebook-${scopeEpoch}`}
+          isOpen={notebookModalOpen}
+          initialMode={notebookInitialTab}
+          onClose={() => setNotebookModalOpen(false)}
+          onImportAsStudyDocument={(doc) => {
+            studyStorage.saveDocument(doc);
+            studyStorage.setActiveDocumentId(doc.id);
+            setDocuments(studyStorage.getDocuments());
+            setActiveDoc(doc);
+            handleSelectTab('sessions');
+          }}
+        />
       )}
 
+      {/* Sign-Out Data Preservation Dialog */}
       {signOutSummary && (
-        <SignOutDialog summary={signOutSummary} busy={signOutBusy} error={signOutError} onChoose={handleSignOutChoice} />
+        <SignOutDialog
+          summary={signOutSummary}
+          busy={signOutBusy}
+          error={signOutError}
+          onChoose={handleSignOutChoice}
+        />
       )}
     </div>
   );

@@ -6,11 +6,17 @@ import type {
 
 export type SubjectDomain = 'physics' | 'chemistry' | 'mathematics';
 
+export type ReviewerStatus = 'active' | 'disabled' | 'revoked' | 'suspended';
+
+export type ReviewerRole = 'reviewer' | 'senior_reviewer' | 'lead_reviewer' | 'admin';
+
 export interface ReviewerSubjectPermission {
   readonly subject: SubjectDomain;
   readonly active: boolean;
   readonly grantedAt: string;
   readonly grantedBy: string;
+  readonly canApprove?: boolean;
+  readonly canRevoke?: boolean;
 }
 
 export interface AuthorizedReviewerProfile {
@@ -18,31 +24,122 @@ export interface AuthorizedReviewerProfile {
   readonly reviewerId: string; // The canonical SME ID, e.g. 'sme-phys-dr-sharma'
   readonly displayName: string;
   readonly email?: string;
+  readonly role?: ReviewerRole;
   readonly permissions: readonly ReviewerSubjectPermission[];
-  readonly status: 'active' | 'suspended' | 'revoked';
+  readonly status: ReviewerStatus;
+  readonly registryVersion?: string;
+  readonly recordVersion?: number;
+  readonly createdAt?: string;
+  readonly createdBy?: string;
+  readonly updatedAt?: string;
+  readonly updatedBy?: string;
+  readonly revokedAt?: string;
+  readonly revokedBy?: string;
+  readonly revocationReason?: string;
+  readonly disabledAt?: string;
+  readonly disabledBy?: string;
+  readonly disableReason?: string;
+}
+
+export type ReviewerAuthorizationDecision = 'authorized' | 'denied' | 'error';
+
+export type ReviewerCommitFailureCode =
+  | 'reviewer_authorization_revoked'
+  | 'reviewer_permission_denied'
+  | 'reviewer_subject_unauthorized'
+  | 'reviewer_not_found'
+  | 'reviewer_uid_mismatch'
+  | 'reviewer_id_mismatch';
+
+export function isReviewerCommitFailureCode(code: string): code is ReviewerCommitFailureCode {
+  return (
+    code === 'reviewer_authorization_revoked' ||
+    code === 'reviewer_permission_denied' ||
+    code === 'reviewer_subject_unauthorized' ||
+    code === 'reviewer_not_found' ||
+    code === 'reviewer_uid_mismatch' ||
+    code === 'reviewer_id_mismatch'
+  );
+}
+
+export type ReviewerAuthorizationFailureCode =
+  | 'auth_required'
+  | 'not_authorized'
+  | 'subject_unauthorized'
+  | 'reviewer_suspended'
+  | 'reviewer_disabled'
+  | 'reviewer_revoked'
+  | 'reviewer_id_spoofing_detected'
+  | 'registry_unavailable'
+  | 'registry_lookup_failed'
+  | 'audit_persistence_failed'
+  | ReviewerCommitFailureCode;
+
+export interface ReviewerAuthorizationAuditRecord {
+  readonly auditId: string;
+  readonly callerUid?: string;
+  readonly resolvedReviewerId?: string;
+  readonly action: 'approve' | 'revoke';
+  readonly decision: ReviewerAuthorizationDecision;
+  readonly code: ReviewerAuthorizationFailureCode | 'authorized';
+  readonly allowed: boolean;
+  readonly requestedSubject: SubjectDomain;
+  readonly requestId: string; // unique UUID per attempt
+  readonly questionId?: string; // dedicated question ID
+  readonly timestamp: string; // ISO 8601
+  readonly registryVersion: string;
+  readonly reason?: string;
+}
+
+export interface ReviewerAuthorizationContext {
+  readonly claimedReviewerId?: string;
+  readonly requestId?: string;
+  readonly questionId?: string;
+  readonly action?: 'approve' | 'revoke';
 }
 
 export type ReviewerAuthorizationOutcome =
-  | { ok: true; profile: AuthorizedReviewerProfile }
+  | { ok: true; profile: AuthorizedReviewerProfile; auditRecord: ReviewerAuthorizationAuditRecord }
   | {
       ok: false;
-      status: 401 | 403;
-      code:
-        | 'auth_required'
-        | 'not_authorized'
-        | 'subject_unauthorized'
-        | 'reviewer_suspended'
-        | 'reviewer_id_spoofing_detected';
+      status: 401 | 403 | 500 | 503;
+      code: ReviewerAuthorizationFailureCode;
       message: string;
+      auditRecord: ReviewerAuthorizationAuditRecord;
     };
 
+export interface ReviewerRegistry {
+  readonly registryVersion: string;
+  getReviewerByUid(uid: string): Promise<AuthorizedReviewerProfile | null>;
+  getReviewerById?(reviewerId: string): Promise<AuthorizedReviewerProfile | null>;
+}
+
+export interface ReviewerAuditRepository {
+  recordDecision(event: ReviewerAuthorizationAuditRecord): Promise<void>;
+  getAuditEvents(filter?: {
+    callerUid?: string;
+    requestId?: string;
+    questionId?: string;
+    limit?: number;
+  }): Promise<readonly ReviewerAuthorizationAuditRecord[]>;
+}
+
 export interface ReviewerAuthority {
+  readonly registryVersion?: string;
   getReviewerProfile(uid: string): Promise<AuthorizedReviewerProfile | null>;
   authorizeReviewer(
     uid: string | undefined,
     subject: SubjectDomain,
-    claimedReviewerId?: string
+    context?: string | ReviewerAuthorizationContext
   ): Promise<ReviewerAuthorizationOutcome>;
+  recordDecision?(record: ReviewerAuthorizationAuditRecord): Promise<void>;
+  getAuditRepository?(): ReviewerAuditRepository;
+  getAuditTrail?(filter?: {
+    callerUid?: string;
+    requestId?: string;
+    questionId?: string;
+    decision?: ReviewerAuthorizationDecision;
+  }): Promise<readonly ReviewerAuthorizationAuditRecord[]>;
 }
 
 // ============================================================================
@@ -174,6 +271,24 @@ export interface FirestoreAuditEventDoc extends ApprovalAuditEvent {
   readonly createdAt: string;
 }
 
+export interface ExpectedReviewerCommitCheck {
+  readonly uid: string;
+  readonly reviewerId: string;
+  readonly subject: SubjectDomain;
+  readonly expectedRecordVersion?: number;
+  readonly expectedRegistryVersion?: string;
+  readonly requireCanRevoke?: boolean;
+}
+
+export interface SaveApprovalOptions {
+  readonly expectedCurrentVersion?: string;
+  readonly expectedReviewer?: ExpectedReviewerCommitCheck;
+}
+
+export interface RevokeApprovalOptions {
+  readonly expectedReviewer?: ExpectedReviewerCommitCheck;
+}
+
 export type SaveApprovalOutcome =
   | { ok: true; record: PersistedApprovalRecord; isDuplicate: boolean }
   | {
@@ -185,7 +300,8 @@ export type SaveApprovalOutcome =
         | 'expected_version_required'
         | 'invalid_question_id'
         | 'invalid_content_digest'
-        | 'repository_unavailable';
+        | 'repository_unavailable'
+        | ReviewerCommitFailureCode;
       error: string;
     };
 
@@ -198,7 +314,8 @@ export type RevokeApprovalOutcome =
         | 'already_revoked'
         | 'invalid_question_id'
         | 'invalid_content_digest'
-        | 'repository_unavailable';
+        | 'repository_unavailable'
+        | ReviewerCommitFailureCode;
       error: string;
     };
 
@@ -207,12 +324,13 @@ export interface ApprovalRecordRepository {
   getApprovalByDigest(questionId: string, contentDigest: string): Promise<PersistedApprovalRecord | null>;
   saveApproval(
     record: ServerApprovalRecord,
-    options?: { expectedCurrentVersion?: string }
+    options?: SaveApprovalOptions
   ): Promise<SaveApprovalOutcome>;
   revokeApproval(
     questionId: string,
     contentDigest: string,
-    revocation: { revokedBy: string; reason: string }
+    revocation: { revokedBy: string; reason: string },
+    options?: RevokeApprovalOptions
   ): Promise<RevokeApprovalOutcome>;
   getAuditHistory(
     questionId: string,

@@ -36,6 +36,10 @@ export const STORAGE_KEYS = Object.freeze({
   STUDY_SESSIONS: 'learnmate_study_sessions_v1',
   STUDY_SESSION_TOMBSTONES: 'learnmate_study_session_tombstones_v1',
   STUDY_SESSION_MIGRATION_REPORT: 'learnmate_study_session_migration_v1',
+  ROADMAP_PROGRESS: 'learnmate_roadmap_progress_v1',
+  ROADMAP_REVISION_QUEUE: 'learnmate_roadmap_revision_queue_v1',
+  ROADMAP_OUTBOX: 'learnmate_roadmap_outbox_v1',
+  ROADMAP_MIGRATION_BACKUP: 'learnmate_roadmap_migration_backup_v1',
 });
 
 /** Device-level preferences that are safe to share between accounts on one device. */
@@ -62,6 +66,10 @@ const PRIVATE_EXACT_KEYS: ReadonlySet<string> = new Set([
   STORAGE_KEYS.STUDY_SESSIONS,
   STORAGE_KEYS.STUDY_SESSION_TOMBSTONES,
   STORAGE_KEYS.STUDY_SESSION_MIGRATION_REPORT,
+  STORAGE_KEYS.ROADMAP_PROGRESS,
+  STORAGE_KEYS.ROADMAP_REVISION_QUEUE,
+  STORAGE_KEYS.ROADMAP_OUTBOX,
+  STORAGE_KEYS.ROADMAP_MIGRATION_BACKUP,
 ]);
 
 const PRIVATE_PREFIXES: readonly string[] = [

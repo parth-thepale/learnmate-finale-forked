@@ -494,3 +494,282 @@ test('Stage D - cross-user and unauthenticated attempts isolation', async () => 
   await denied(deleteDoc(doc(anon, cloudPaths.attempt('alice', aliceId))), 'anon cannot delete attempt');
   await denied(setDoc(doc(anon, cloudPaths.chunk(cloudPaths.attempt('alice', aliceId), 0)), validChunkDoc('alice', 0)), 'anon cannot write chunk');
 });
+
+// ---------------------------------------------------------------------------
+// Roadmap collections (roadmaps, roadmapRevisionQueue, roadmapAttempts)
+// ---------------------------------------------------------------------------
+
+function validRoadmapDoc(userId: string, roadmapId: string): Record<string, unknown> {
+  return {
+    roadmapId,
+    uid: userId,
+    completionPercentage: 50,
+    completedCheckpointsCount: 2,
+    currentCheckpointId: 'PHY-01-CP2',
+    checkpointsJson: JSON.stringify({}),
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+function validRevisionItemDoc(userId: string, itemId: string): Record<string, unknown> {
+  return {
+    id: itemId,
+    uid: userId,
+    topicId: 'physics.kinematics.motion',
+    topicName: 'Motion in a Straight Line',
+    roadmapId: 'PHY-01',
+    checkpointId: 'PHY-01-CP1',
+    scheduledForDate: '2026-11-05',
+    intervalStep: 1,
+    status: 'upcoming',
+    consecutiveMasteryCount: 1,
+    priority: 'medium',
+    reason: 'Initial revision interval step 1',
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+function validRoadmapAttemptDoc(
+  userId: string,
+  attemptId: string,
+  overrides: Record<string, unknown> = {}
+): Record<string, unknown> {
+  return {
+    id: attemptId,
+    uid: userId,
+    checkpointId: 'PHY-01-CP1',
+    roadmapId: 'PHY-01',
+    percentage: 75,
+    rawMarks: 3,
+    totalMarks: 4,
+    correctCount: 3,
+    incorrectCount: 1,
+    unansweredCount: 0,
+    timeTakenSeconds: 320,
+    completedAt: new Date().toISOString(),
+    attemptJson: JSON.stringify({ answers: [] }),
+    updatedAt: new Date().toISOString(),
+    ...overrides,
+  };
+}
+
+test('roadmap: read and write by owner succeeds; non-owner and anonymous rejected', async () => {
+  const alice = as('alice');
+  const bob = as('bob');
+  const anon = anonymous();
+  const pathName = cloudPaths.roadmap('alice', 'PHY-01');
+
+  // Owner write succeeds
+  await allowed(setDoc(doc(alice, pathName), validRoadmapDoc('alice', 'PHY-01')), 'owner can write valid roadmap');
+  // Owner read succeeds
+  await allowed(getDoc(doc(alice, pathName)), 'owner can read own roadmap');
+
+  // Non-owner rejected
+  await denied(getDoc(doc(bob, pathName)), 'non-owner cannot read roadmap');
+  await denied(setDoc(doc(bob, pathName), validRoadmapDoc('bob', 'PHY-01')), 'non-owner cannot write to another user roadmap path');
+
+  // Anonymous rejected
+  await denied(getDoc(doc(anon, pathName)), 'anonymous cannot read roadmap');
+  await denied(setDoc(doc(anon, pathName), validRoadmapDoc('alice', 'PHY-01')), 'anonymous cannot write roadmap');
+});
+
+test('roadmap: invalid schema is rejected', async () => {
+  const alice = as('alice');
+  const pathName = cloudPaths.roadmap('alice', 'PHY-01');
+
+  // Percentage > 100
+  await denied(
+    setDoc(doc(alice, pathName), { ...validRoadmapDoc('alice', 'PHY-01'), completionPercentage: 150 }),
+    'percentage > 100 rejected'
+  );
+
+  // Percentage < 0
+  await denied(
+    setDoc(doc(alice, pathName), { ...validRoadmapDoc('alice', 'PHY-01'), completionPercentage: -10 }),
+    'negative percentage rejected'
+  );
+
+  // completedCheckpointsCount > 4
+  await denied(
+    setDoc(doc(alice, pathName), { ...validRoadmapDoc('alice', 'PHY-01'), completedCheckpointsCount: 5 }),
+    'completedCheckpointsCount > 4 rejected'
+  );
+
+  // Missing required field (checkpointsJson)
+  const incomplete = { ...validRoadmapDoc('alice', 'PHY-01') };
+  delete (incomplete as any).checkpointsJson;
+  await denied(setDoc(doc(alice, pathName), incomplete), 'missing required field rejected');
+});
+
+test('roadmapRevisionQueue: owner read/write succeeds with valid schema; invalid rejected', async () => {
+  const alice = as('alice');
+  const bob = as('bob');
+  const itemId = 'rev_PHY-01-CP1_0';
+  const pathName = cloudPaths.roadmapRevisionItem('alice', itemId);
+
+  // Owner write succeeds
+  await allowed(setDoc(doc(alice, pathName), validRevisionItemDoc('alice', itemId)), 'owner can write revision item');
+  // Owner read succeeds
+  await allowed(getDoc(doc(alice, pathName)), 'owner can read revision item');
+
+  // Non-owner denied
+  await denied(getDoc(doc(bob, pathName)), 'non-owner cannot read revision item');
+
+  // Invalid status rejected
+  await denied(
+    setDoc(doc(alice, pathName), { ...validRevisionItemDoc('alice', itemId), status: 'not_a_real_status' }),
+    'invalid status rejected'
+  );
+
+  // Invalid priority rejected
+  await denied(
+    setDoc(doc(alice, pathName), { ...validRevisionItemDoc('alice', itemId), priority: 'critical_emergency' }),
+    'invalid priority rejected'
+  );
+
+  // intervalStep > 10 rejected
+  await denied(
+    setDoc(doc(alice, pathName), { ...validRevisionItemDoc('alice', itemId), intervalStep: 15 }),
+    'intervalStep > 10 rejected'
+  );
+});
+
+test('roadmapAttempts: create succeeds for owner; update/delete rejected; invalid score range rejected', async () => {
+  const alice = as('alice');
+  const bob = as('bob');
+  const attemptId = 'att_PHY-01-CP1_1';
+  const pathName = cloudPaths.roadmapAttempt('alice', attemptId);
+
+  // Owner create succeeds
+  await allowed(setDoc(doc(alice, pathName), validRoadmapAttemptDoc('alice', attemptId)), 'owner can create attempt');
+
+  // Update rejected by rule (allow update, delete: if false)
+  await denied(
+    setDoc(doc(alice, pathName), validRoadmapAttemptDoc('alice', attemptId, { percentage: 95 })),
+    'update must be rejected'
+  );
+
+  // Delete rejected by rule
+  await denied(deleteDoc(doc(alice, pathName)), 'delete must be rejected');
+
+  // Non-owner cannot create or read
+  await denied(getDoc(doc(bob, pathName)), 'non-owner cannot read attempt');
+  await denied(
+    setDoc(doc(bob, cloudPaths.roadmapAttempt('bob', attemptId)), validRoadmapAttemptDoc('alice', attemptId)),
+    'cannot spoof another uid in attempt payload'
+  );
+
+  // Invalid percentage > 100 rejected
+  const invalidOver = 'att_invalid_over';
+  await denied(
+    setDoc(doc(alice, cloudPaths.roadmapAttempt('alice', invalidOver)), validRoadmapAttemptDoc('alice', invalidOver, { percentage: 110 })),
+    'percentage > 100 rejected'
+  );
+
+  // Invalid percentage < 0 rejected
+  const invalidUnder = 'att_invalid_under';
+  await denied(
+    setDoc(doc(alice, cloudPaths.roadmapAttempt('alice', invalidUnder)), validRoadmapAttemptDoc('alice', invalidUnder, { percentage: -5 })),
+    'percentage < 0 rejected'
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Server-only verified content approval repository and audit subcollections
+// ---------------------------------------------------------------------------
+
+test('verifiedQuestionApprovals: client access (authenticated & anonymous) strictly denied for docs and subcollections', async () => {
+  const alice = as('alice');
+  const anon = anonymous();
+
+  const activeDocPath = 'verifiedQuestionApprovals/active_PHY-01-Q1';
+  const versionDocPath = 'verifiedQuestionApprovals/appr_PHY-01-Q1_1111111111111111';
+  const auditEventDocPath = 'verifiedQuestionApprovals/PHY-01-Q1/auditEvents/evt_000001_approved';
+
+  // Seed documents via admin/rules-disabled context
+  await seed(activeDocPath, { questionId: 'PHY-01-Q1', docType: 'active_pointer' });
+  await seed(versionDocPath, { questionId: 'PHY-01-Q1', docType: 'approval_version' });
+  await seed(auditEventDocPath, { questionId: 'PHY-01-Q1', docType: 'audit_event' });
+
+  // 1. Authenticated user operations must all fail
+  await denied(getDoc(doc(alice, activeDocPath)), 'alice cannot read active pointer');
+  await denied(getDoc(doc(alice, versionDocPath)), 'alice cannot read version doc');
+  await denied(getDoc(doc(alice, auditEventDocPath)), 'alice cannot read audit event doc');
+  await denied(getDocs(collection(alice, 'verifiedQuestionApprovals')), 'alice cannot list approvals');
+  await denied(getDocs(collection(alice, 'verifiedQuestionApprovals/PHY-01-Q1/auditEvents')), 'alice cannot list audit events');
+  await denied(setDoc(doc(alice, activeDocPath), { hacked: true }), 'alice cannot write active pointer');
+  await denied(setDoc(doc(alice, versionDocPath), { hacked: true }), 'alice cannot write version doc');
+  await denied(setDoc(doc(alice, auditEventDocPath), { hacked: true }), 'alice cannot write audit event doc');
+  await denied(deleteDoc(doc(alice, activeDocPath)), 'alice cannot delete active pointer');
+
+  // 2. Anonymous user operations must all fail
+  await denied(getDoc(doc(anon, activeDocPath)), 'anon cannot read active pointer');
+  await denied(getDoc(doc(anon, versionDocPath)), 'anon cannot read version doc');
+  await denied(getDoc(doc(anon, auditEventDocPath)), 'anon cannot read audit event doc');
+  await denied(getDocs(collection(anon, 'verifiedQuestionApprovals')), 'anon cannot list approvals');
+  await denied(getDocs(collection(anon, 'verifiedQuestionApprovals/PHY-01-Q1/auditEvents')), 'anon cannot list audit events');
+  await denied(setDoc(doc(anon, activeDocPath), { hacked: true }), 'anon cannot write active pointer');
+  await denied(setDoc(doc(anon, versionDocPath), { hacked: true }), 'anon cannot write version doc');
+  await denied(setDoc(doc(anon, auditEventDocPath), { hacked: true }), 'anon cannot write audit event doc');
+  await denied(deleteDoc(doc(anon, activeDocPath)), 'anon cannot delete active pointer');
+});
+
+// ---------------------------------------------------------------------------
+// Server-only trusted reviewer registry and authorization audit collections
+// ---------------------------------------------------------------------------
+
+test('trustedReviewers: client access (authenticated & anonymous) strictly denied for read, write, create, update, delete, and list', async () => {
+  const alice = as('alice');
+  const anon = anonymous();
+  const reviewerDocPath = 'trustedReviewers/uid-sme-phys-01';
+
+  // Seed via admin/rules-disabled context
+  await seed(reviewerDocPath, {
+    uid: 'uid-sme-phys-01',
+    reviewerId: 'sme-phys-dr-sharma',
+    status: 'active',
+  });
+
+  // 1. Authenticated user operations must all fail
+  await denied(getDoc(doc(alice, reviewerDocPath)), 'alice cannot read reviewer doc');
+  await denied(getDocs(collection(alice, 'trustedReviewers')), 'alice cannot list reviewer collection');
+  await denied(setDoc(doc(alice, 'trustedReviewers/uid-hacker'), { uid: 'uid-hacker' }), 'alice cannot create reviewer doc');
+  await denied(setDoc(doc(alice, reviewerDocPath), { status: 'revoked' }, { merge: true }), 'alice cannot update reviewer doc');
+  await denied(deleteDoc(doc(alice, reviewerDocPath)), 'alice cannot delete reviewer doc');
+
+  // 2. Anonymous user operations must all fail
+  await denied(getDoc(doc(anon, reviewerDocPath)), 'anon cannot read reviewer doc');
+  await denied(getDocs(collection(anon, 'trustedReviewers')), 'anon cannot list reviewer collection');
+  await denied(setDoc(doc(anon, 'trustedReviewers/uid-hacker'), { uid: 'uid-hacker' }), 'anon cannot create reviewer doc');
+  await denied(setDoc(doc(anon, reviewerDocPath), { status: 'revoked' }, { merge: true }), 'anon cannot update reviewer doc');
+  await denied(deleteDoc(doc(anon, reviewerDocPath)), 'anon cannot delete reviewer doc');
+});
+
+test('reviewerAuthorizationAudit: client access (authenticated & anonymous) strictly denied for read, write, create, update, delete, and list', async () => {
+  const alice = as('alice');
+  const anon = anonymous();
+  const auditDocPath = 'reviewerAuthorizationAudit/rev_audit_000001';
+
+  // Seed via admin/rules-disabled context
+  await seed(auditDocPath, {
+    auditId: 'rev_audit_000001',
+    decision: 'authorized',
+    callerUid: 'uid-sme-phys-01',
+  });
+
+  // 1. Authenticated user operations must all fail
+  await denied(getDoc(doc(alice, auditDocPath)), 'alice cannot read audit doc');
+  await denied(getDocs(collection(alice, 'reviewerAuthorizationAudit')), 'alice cannot list audit collection');
+  await denied(setDoc(doc(alice, 'reviewerAuthorizationAudit/rev_audit_fake'), { decision: 'authorized' }), 'alice cannot create audit doc');
+  await denied(setDoc(doc(alice, auditDocPath), { tampered: true }, { merge: true }), 'alice cannot update audit doc');
+  await denied(deleteDoc(doc(alice, auditDocPath)), 'alice cannot delete audit doc');
+
+  // 2. Anonymous user operations must all fail
+  await denied(getDoc(doc(anon, auditDocPath)), 'anon cannot read audit doc');
+  await denied(getDocs(collection(anon, 'reviewerAuthorizationAudit')), 'anon cannot list audit collection');
+  await denied(setDoc(doc(anon, 'reviewerAuthorizationAudit/rev_audit_fake'), { decision: 'authorized' }), 'anon cannot create audit doc');
+  await denied(setDoc(doc(anon, auditDocPath), { tampered: true }, { merge: true }), 'anon cannot update audit doc');
+  await denied(deleteDoc(doc(anon, auditDocPath)), 'anon cannot delete audit doc');
+});
+
+

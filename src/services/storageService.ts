@@ -75,6 +75,7 @@ import {
 } from './cloudEntities';
 import { PayloadTooLargeError } from './cloudPayload';
 import { SyncStatusTracker, type SyncSnapshot } from './syncStatus';
+import { RoadmapOutboxService } from '../features/roadmaps/services/roadmapOutboxService';
 
 /**
  * Storage repository interface supporting local browser persistence (isolated per account on
@@ -182,6 +183,8 @@ export interface IStudyStorageRepository {
   activateAccount(user: User | null): void;
   /** Activates the account scope and synchronises it with the cloud. */
   syncWithCloudUser(user: User | null): Promise<void>;
+  /** Retries queued dirty writes that failed due to temporary network or connection issues. */
+  retrySync(): Promise<void>;
   /** Waits (up to timeoutMs) for queued cloud writes to settle. */
   flushPendingWrites(timeoutMs?: number): Promise<void>;
   getSyncSnapshot(): SyncSnapshot;
@@ -192,8 +195,11 @@ export interface IStudyStorageRepository {
   /**
    * Deletes one signed-in account's private local data (its scope only) from this device. Never
    * touches the guest scope or other accounts. Returns the number of storage entries removed.
+   * If pending or failed roadmap outbox mutations remain, refuses removal unless options.force is true.
    */
-  removeAccountDataFromDevice(uid: string): number;
+  removeAccountDataFromDevice(uid: string, options?: { force?: boolean }): number;
+  getUnderlyingStorage(): KeyValueStorage | null;
+  getCloudStore(): CloudDocStore | null;
   getActiveScope(): LocalScope | null;
   getLastLegacyMigration(): LegacyMigrationResult | null;
   subscribe(listener: () => void): () => void;
@@ -459,6 +465,19 @@ export class HybridCloudStudyRepository implements IStudyStorageRepository {
     this.stageDRulesConfirmed = options.stageDRulesConfirmed ?? false;
     this.sync = new SyncStatusTracker(() => this.getUnsyncedChangeCount());
     this.sync.subscribe(() => this.notifyListeners());
+    if (typeof window !== 'undefined') {
+      window.addEventListener('online', () => {
+        if (this.currentUser && this.cloud) {
+          void this.flushDirty().then(() => this.notifyListeners());
+        }
+      });
+    }
+  }
+
+  async retrySync(): Promise<void> {
+    if (!this.currentUser || !this.cloud) return;
+    await this.flushDirty();
+    this.notifyListeners();
   }
 
   isStageDRulesConfirmed(): boolean {
@@ -766,10 +785,21 @@ export class HybridCloudStudyRepository implements IStudyStorageRepository {
     this.notifyListeners();
   }
 
-  removeAccountDataFromDevice(uid: string): number {
+  removeAccountDataFromDevice(uid: string, options?: { force?: boolean }): number {
     if (!this.storage) return 0;
     const target = scopeForUid(uid);
     if (target === 'guest') throw new Error('Refusing to remove guest data as an account.');
+
+    // Protect roadmap outbox from accidental deletion if pending, failed, or unpersisted mutations remain
+    const pendingRoadmap = RoadmapOutboxService.getPendingCount(uid, this.storage);
+    const failedRoadmap = RoadmapOutboxService.getPermanentFailures(uid, this.storage).length;
+    const unpersistedRoadmap = RoadmapOutboxService.getUnpersistedCount(uid);
+    if ((pendingRoadmap > 0 || failedRoadmap > 0 || unpersistedRoadmap > 0) && !options?.force) {
+      throw new Error(
+        `Refusing to remove account data for "${uid}": ${pendingRoadmap} pending, ${failedRoadmap} failed, and ${unpersistedRoadmap} unpersisted roadmap mutations remain. Flush or pass force: true.`
+      );
+    }
+
     if (this.scope === target) {
       // Still active: detach first so nothing is written back into the scope being removed.
       this.unsubscribeCloudListeners();
@@ -784,6 +814,14 @@ export class HybridCloudStudyRepository implements IStudyStorageRepository {
     const removed = clearScope(this.storage, target);
     this.notifyListeners();
     return removed;
+  }
+
+  getUnderlyingStorage(): KeyValueStorage | null {
+    return this.storage;
+  }
+
+  getCloudStore(): CloudDocStore | null {
+    return this.cloud;
   }
 
   async flushPendingWrites(timeoutMs = 8_000): Promise<void> {

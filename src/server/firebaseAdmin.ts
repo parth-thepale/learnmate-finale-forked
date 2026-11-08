@@ -17,6 +17,20 @@ import {
   UnavailableQuestionSetStore,
   type QuestionSetStore,
 } from './questionSetStore.ts';
+import {
+  FirestoreApprovalRecordRepository,
+  MemoryApprovalRecordRepository,
+  UnavailableApprovalRecordRepository,
+} from './contentVerification/approvalRepository.ts';
+import {
+  FirestoreReviewerRegistry,
+  FirestoreReviewerAuditRepository,
+  MemoryReviewerRegistry,
+  MemoryReviewerAuditRepository,
+  UnavailableReviewerRegistry,
+  UnavailableReviewerAuditRepository,
+} from './contentVerification/reviewerAuthority.ts';
+import type { ApprovalRecordRepository, ReviewerAuditRepository, ReviewerRegistry } from './contentVerification/types.ts';
 
 export type AdminCredentialMode = 'service_account_json' | 'application_default' | 'none';
 
@@ -102,6 +116,9 @@ export interface ServerFirebaseAdmin {
   verifyIdToken: IdTokenVerifier;
   quotaStore: DailyQuotaStore;
   questionSetStore: QuestionSetStore;
+  approvalRepository: ApprovalRecordRepository;
+  reviewerRegistry: ReviewerRegistry;
+  reviewerAuditRepository: ReviewerAuditRepository;
 }
 
 /**
@@ -150,20 +167,33 @@ export function initServerFirebaseAdmin(params: {
 
   let quotaStore: DailyQuotaStore;
   let questionSetStore: QuestionSetStore;
+  let approvalRepository: ApprovalRecordRepository;
+  let reviewerRegistry: ReviewerRegistry;
+  let reviewerAuditRepository: ReviewerAuditRepository;
   if (app && config.mode !== 'none') {
     const db =
       config.databaseId && config.databaseId !== '(default)' ? getFirestore(app, config.databaseId) : getFirestore(app);
     quotaStore = new FirestoreDailyQuotaStore(db as unknown as QuotaFirestore);
     questionSetStore = new FirestoreQuestionSetStore(db as unknown as QuotaFirestore);
+    approvalRepository = new FirestoreApprovalRecordRepository(db as unknown as QuotaFirestore);
+    reviewerRegistry = new FirestoreReviewerRegistry(db as unknown as QuotaFirestore);
+    reviewerAuditRepository = new FirestoreReviewerAuditRepository(db as unknown as QuotaFirestore);
   } else if (!params.isProduction) {
     quotaStore = new MemoryDailyQuotaStore();
     questionSetStore = new MemoryQuestionSetStore();
+    const memoryReviewerRegistry = new MemoryReviewerRegistry([], '2026.1');
+    reviewerRegistry = memoryReviewerRegistry;
+    approvalRepository = new MemoryApprovalRecordRepository(memoryReviewerRegistry);
+    reviewerAuditRepository = new MemoryReviewerAuditRepository();
   } else {
     const reason =
       'Firebase Admin credentials are not configured (set FIREBASE_SERVICE_ACCOUNT_JSON or GOOGLE_APPLICATION_CREDENTIALS).';
     quotaStore = new UnavailableDailyQuotaStore(reason);
     questionSetStore = new UnavailableQuestionSetStore(reason);
+    approvalRepository = new UnavailableApprovalRecordRepository(reason);
+    reviewerRegistry = new UnavailableReviewerRegistry(reason);
+    reviewerAuditRepository = new UnavailableReviewerAuditRepository(reason);
   }
 
-  return { config, verifyIdToken, quotaStore, questionSetStore };
+  return { config, verifyIdToken, quotaStore, questionSetStore, approvalRepository, reviewerRegistry, reviewerAuditRepository };
 }

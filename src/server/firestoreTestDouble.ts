@@ -38,6 +38,16 @@ export class StrictFakeFirestore implements QuotaFirestore {
           assertFirestoreValue(data);
           staged.push([ref as string, structuredClone(data)]);
         },
+        create: (ref, data) => {
+          assertFirestoreValue(data);
+          const path = ref as string;
+          if (this.docs.has(path) || staged.some(([p]) => p === path)) {
+            const err: any = new Error(`6 ALREADY_EXISTS: Document already exists: ${path}`);
+            err.code = 6;
+            throw err;
+          }
+          staged.push([path, structuredClone(data)]);
+        },
         delete: (ref) => {
           staged.push([ref as string, null]);
         },

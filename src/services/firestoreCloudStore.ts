@@ -26,7 +26,26 @@ export function createFirestoreCloudStore(db: Firestore): CloudDocStore {
       if (ops.length === 0) return;
       if (ops.length > 450) throw new Error('Too many operations for one atomic cloud write.');
       const batch = writeBatch(db);
+      // Coalesce operations per path: Firestore writeBatch fails if a path is touched multiple times
+      const coalesced = new Map<string, CloudWriteOp>();
       for (const op of ops) {
+        const existing = coalesced.get(op.path);
+        if (!existing || op.type === 'delete') {
+          coalesced.set(op.path, { ...op });
+        } else {
+          const mergedData =
+            op.merge !== false && existing.type === 'set'
+              ? { ...(existing.data || {}), ...(op.data || {}) }
+              : { ...(op.data || {}) };
+          coalesced.set(op.path, {
+            type: 'set',
+            path: op.path,
+            data: mergedData,
+            merge: op.merge !== false || (existing.type === 'set' && existing.merge !== false),
+          });
+        }
+      }
+      for (const op of coalesced.values()) {
         const ref = doc(db, op.path);
         if (op.type === 'delete') batch.delete(ref);
         else if (op.merge) batch.set(ref, op.data, { merge: true });
